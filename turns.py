@@ -1,0 +1,262 @@
+turns = [
+    # 0
+    {
+        "input": "I'm trying to decide whether to come for workshop day. When are the workshops?",
+        "golden_text": "Workshop day is on Tuesday, June 3rd. There will be exclusive, hands-on workshops across five different tracks, with topics for all experience levels.",
+        "required_function_call": None,
+    },
+    # 1
+    {
+        "input": "Are there any workshops about Gemini?",
+        "golden_text": """Yes, there are two workshops on that day that feature Gemini!
+
+First, at 10:40 AM, there's **"Building Voice Agents with Gemini and Pipecat,"** where you can build and deploy your own voice agent.
+
+Later, at 1:00 PM, you can attend **"AI Engineering with the Google Gemini 2.5 Model Family,"** which is a hands-on workshop where you'll learn to use Gemini 2.5 Pro with agentic tooling.""",
+        "required_function_call": None,
+    },
+    # 2
+    {
+        "input": "How many conference tracks are there?",
+        "golden_text": "There will be 19 tracks of talks, panels, and demos during the main conference days on June 4th and 5th.",
+        "required_function_call": None,
+    },
+    # 3
+    {
+        "input": "Is there a track about MCP?",
+        "golden_text": "Yes, there is an MCP track on June 4th. It focuses on the Model Context Protocol and covers its origins, how to build with it, and its future possibilities for agent-to-agent communication.",
+        "required_function_call": None,
+    },
+    # 4
+    {
+        "input": "How many sessions are in that track?",
+        "golden_text": "The MCP track on June 4th features a variety of sessions, including keynotes and talks. There are also several workshops on June 3rd that are focused on building with MCP. The sessions cover topics like the origins of MCP, its practical implementation, and its role in the future of AI agents.",
+        "required_function_call": None,
+    },
+    # 5
+    {
+        "input": "It seems like there are so many great sessions. Can you suggest some sessions for me?",
+        "golden_text": "I agree, there are a lot of exciting sessions! To give you the best recommendations, could you tell me what topics you're most interested in? For example, are you into building agents, infrastructure, voice technology, or something else?",
+        "required_function_call": None,
+    },
+    # 6
+    {
+        "input": "I'm particularly interested in Voice AI and in techniques for building reliable agents.",
+        "golden_text": "Those are fantastic topics! To help me narrow down the best sessions for you, could you let me know which day or days you'll be at the conference? And will you be there all day, or just for the morning or afternoon?",
+        "required_function_call": None,
+    },
+    # 7
+    {
+        "input": "I'll be at the conference on June 4th all day.",
+        "golden_text": """Excellent! Based on your interests in Voice AI and building reliable agents, I have two great suggestions for you for June 4th.
+
+First, I'd recommend the session **"[Voice Keynote] Your realtime AI is ngmi"** by Sean DuBois and Kwindla Kramer. It's on June 4th at 11:15 AM. They'll be discussing why you need to design real-time AI systems from the network layer up to be successful.
+
+Second, you might like **"12 Factor Agents - Principles of Reliable LLM Applications"** by Dexter Horthy. That's on June 4th at 11:35 AM. He'll be sharing principles for building LLM-powered software that is reliable enough for production customers.
+
+I hope these suggestions are helpful for planning your day! Let me know if you need anything else.""",
+        "required_function_call": None,
+    },
+    # 8
+    {
+        "input": "Actually, I made a mistake. I will only be at the conference on June 5th.",
+        "golden_text": """No problem at all! Let's find you some great sessions for June 5th. Based on your interest in Voice AI and building reliable agents, here are two recommendations for that day:
+
+First, for your interest in Voice AI, I suggest **"Serving Voice AI at Scale,"** which is a fireside chat with Arjun Desai and Rohit Talluri. It's happening on June 5th at 1:15 PM. They'll be doing a technical deep dive into the best practices for building a state-of-the-art inference stack for voice AI.
+
+Second, to learn more about reliable agents, I'd recommend **"Ship it! Building Production-Ready Agents"** by Mike Chambers. This talk is on June 5th at 12:15 PM and will cover the practical challenges and solutions for deploying AI agents in real-world production environments.
+
+I hope these updated suggestions are helpful for planning your day on June 5th! Let me know if you need anything else""",
+        "required_function_call": None,
+    },
+    # 9
+    {
+        "input": "I heard there will be community organized hallway track sessions. Can I make a suggestion for a hallway track session?",
+        "golden_text": "Yes, I can help with that! I can submit a suggestion for a hallway track session for you. What is your name and what is your suggestion?",
+        "required_function_call": None,
+    },
+    # 10
+    {
+        "input": "My name is Jennifer Smith.",
+        "golden_text": "Thanks, Jennifer! And what's your suggestion for the hallway track session?",
+        "required_function_call": None,
+    },
+    # 11
+    {
+        "input": "My suggestion is for a session about open telemetry tracing.",
+        "golden_text": "",
+        "required_function_call": {
+            "name": "submit_session_suggestion",
+            "args": {
+                "name": "Jennifer Smith",
+                "suggestion_text": "A session about open telemetry tracing.",
+            },
+        },
+        "function_call_response": {
+            "status": "success",
+        },
+    },
+    # 12 - Function call submission
+    {
+        "input": "",
+        "golden_text": "Thank you, Jennifer! I've submitted your suggestion for a session on open telemetry tracing. Is there anything else I can help you with today?",
+        "required_function_call": None,
+    },
+    # 13
+    {
+        "input": "Oh, one more suggestion. How about a session on state machine abstractions for complex workflows?.",
+        "golden_text": "",
+        "required_function_call": {
+            "name": "submit_session_suggestion",
+            "args": {
+                "suggestion_text": "A session on state machine abstractions for complex workflows.",
+                "name": "Jennifer Smith",
+            },
+        },
+        "function_call_response": {
+            "status": "success",
+        },
+    },
+    # 14 - Function call submission
+    {
+        "input": "",
+        "golden_text": "Got it! I've also submitted your suggestion for a session on state machine abstractions for complex workflows. Thank you for your valuable input! Can I help with anything else?",
+        "required_function_call": None,
+    },
+    # 15
+    {
+        "input": "Thanks for submitting both session suggestions. Is there food at the conference?",
+        "golden_text": "Yes, meals are provided throughout the conference. Continental breakfast and lunch are available on all three days, June 3rd through the 5th. There are also morning and afternoon breaks with refreshments, a Welcome Reception on the evening of the 3rd, and an afterparty on the evening of the 4th.",
+        "required_function_call": None,
+    },
+    # 16
+    {
+        "input": "Will there be vegan options?",
+        "golden_text": "Of course! I can submit a dietary request to ensure there are vegan options available for you. I have your name as Jennifer Smith. Is that correct?",
+        "required_function_call": None,
+    },
+    # 17
+    {
+        "input": "Yes.",
+        "golden_text": "",
+        "required_function_call": {
+            "name": "submit_dietary_request",
+            "args": {"name": "Jennifer Smith", "dietary_preference": "vegan"},
+        },
+        "function_call_response": {
+            "status": "success",
+        },
+    },
+    # 18 - Function call submission
+    {
+        "input": "",
+        "golden_text": "Thank you, Jennifer. I've submitted your request for vegan meals. Is there anything else I can help you with today?",
+        "required_function_call": None,
+    },
+    # 19
+    {
+        "input": "Yes. I'm having trouble with the mobile app.",
+        "golden_text": "I'm sorry to hear you're having trouble. I can create a tech support ticket for you. What seems to be the problem with the mobile app?",
+        "required_function_call": None,
+    },
+    # 20
+    {
+        "input": "I can't access the location maps.",
+        "golden_text": "",
+        "required_function_call": {
+            "name": "request_tech_support",
+            "args": {
+                "issue_description": "Cannot access location maps on the mobile app.",
+                "name": "Jennifer Smith",
+            },
+        },
+        "function_call_response": {
+            "status": "success",
+        },
+    },
+    # 21 - Function call submission
+    {
+        "input": "",
+        "golden_text": "Thank you, Jennifer. I've created a tech support ticket for you regarding the issue with accessing location maps on the mobile app. Someone from our tech team will look into it. Is there anything else I can help you with?",
+        "required_function_call": None,
+    },
+    # 22
+    {
+        "input": "",
+        "golden_text": "",
+        "required_function_call": None,
+    },
+    # 23
+    {
+        "input": "I know this is a silly question, but what day is it today?",
+        "golden_text": "I'm the voice assistant for the AI Engineer World's Fair 2025, and I can only answer questions about the event. How can I help you with the fair today?",
+        "required_function_call": None,
+    },
+    # 24
+    {
+        "input": "Well, since I can't access the mobile maps, can you tell me how to get to Salon 2?",
+        "golden_text": "I understand you're looking for Salon 2 since the maps in the app aren't working for you. Unfortunately, I don't have the ability to provide directions or information about specific locations within the venue. The tech support team has been notified about the app issue. Can I help you with any information about the sessions or speakers instead?",
+        "required_function_call": None,
+    },
+    # 25
+    {
+        "input": "Is there a talk by Charles Frye?",
+        "golden_text": """Yes, Charles Frye is speaking at the conference. He has two sessions on June 4th.
+
+First, at 11:15 AM, he's giving a workshop called **"What every AI engineer needs to know about GPUs."**
+
+Then, at 12:45 PM, he's giving a talk titled **"How fast are LLM inference engines anyway?"**
+
+Both are part of the AI in Action track.""",
+        "required_function_call": None,
+    },
+    # 26
+    {
+        "input": "Where is the second one?",
+        "golden_text": """That talk, "How fast are LLM inference engines anyway?", will be in the Juniper: Expo Sessions room.""",
+        "required_function_call": None,
+    },
+    # 27
+    {
+        "input": "I heard that there's some way to vote for our favorite talk of the conference. Is that true?",
+        "golden_text": "Yes, that's correct! You can vote for your favorite sessions. I can help you with that. I'll just need the Session ID for the talk you'd like to vote for. I already have your name as Jennifer Smith.",
+        "required_function_call": None,
+    },
+    # 28
+    {
+        "input": "I don't know the session ID, but the talk was by Harald Kirschner.",
+        "golden_text": """Of course. Harald Kirschner is involved in three sessions. Could you please tell me which one you'd like to vote for?
+
+*   First, there's the workshop on June 3rd titled: **"Real-World Development with GitHub Copilot and VS Code."**
+*   Second, is the talk on June 4th titled: **"Full Spectrum MCP: Uncovering Hidden Servers and Clients Capabilities."**
+*   And third, the talk on June 5th is titled: **"Vibe Coding at Scale: Customizing AI Assistants for Enterprise Environments."**""",
+        "required_function_call": None,
+    },
+    # 29
+    {
+        "input": "I'd like to vote for the one about vibe coding.",
+        "golden_text": "",
+        "required_function_call": {
+            "name": "vote_for_session",
+            "args": {"session_id": "936902", "name": "Jennifer Smith"},
+        },
+        "function_call_response": {
+            "status": "success",
+        },
+    },
+    # 30 - Function call submission
+    {
+        "input": "",
+        "golden_text": "Thank you, Jennifer! I've submitted your vote for the session on Vibe Coding at Scale: Customizing AI Assistants for Enterprise Environments. Is there anything else I can help you with today?",
+        "required_function_call": None,
+    },
+    # 31
+    {
+        "input": "I just wanted to say the conference was great. I don't have anything else.",
+        "golden_text": "Thank you for your feedback, Jennifer! I'm so glad you enjoyed the conference. Have a great day",
+        "required_function_call": {
+            "name": "end_session",
+            "args": {},
+        },
+    },
+]
