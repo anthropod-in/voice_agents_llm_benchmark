@@ -4,11 +4,9 @@ version = "0.1.0"
 description = "Eval runner for AI Engineer World's Fair conversations"
 requires-python = ">=3.12"
 dependencies = [
-  "pipecat-ai[google,openai,aws]==0.0.84",
+  "pipecat-ai[google,openai,aws]",
   "python-dotenv",
   "loguru",
-  "openai>=1.0.0",
-  "google-genai>=0.2.0",
   "sounddevice>=0.4.6",
   "soundfile>=0.12.1",
   "numpy>=1.26",
@@ -29,3 +27,7 @@ packages = ["scripts"]
 
 [tool.hatch.build.targets.sdist]
 only-include = ["scripts", "scripts/record_turn_audio.py", "turns.py"]
+
+[tool.uv.sources]
+# Use local checkout of pipecat instead of PyPI
+"pipecat-ai" = { path = "vendor/pipecat" }

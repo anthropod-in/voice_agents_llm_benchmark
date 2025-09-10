@@ -9,6 +9,7 @@ from typing import Callable, Dict, Any, List, Optional
 from loguru import logger
 from dotenv import load_dotenv
 
+from pipecat.processors.transcript_processor import TranscriptProcessor
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -17,11 +18,8 @@ from pipecat.frames.frames import (
     Frame,
     MetricsFrame,
     CancelFrame,
-    InputAudioRawFrame,
-    LLMFullResponseStartFrame,
     LLMFullResponseEndFrame,
-    LLMTextFrame,
-    LLMMessagesAppendFrame,
+    TranscriptionMessage,
 )
 from pipecat.metrics.metrics import (
     LLMUsageMetricsData,
@@ -31,9 +29,8 @@ from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.services.openai.base_llm import BaseOpenAILLMService
-from pipecat.services.openai_realtime_beta.openai import (
-    OpenAIRealtimeBetaLLMService as OpenAIRealtimeAPIBetaLLMService,
-)
+from pipecat.services.openai_realtime.openai import OpenAIRealtimeLLMService
+from pipecat.services.openai_realtime import events as rt_events
 from pipecat.processors.aggregators.llm_response import LLMAssistantAggregatorParams
 from pipecat.processors.aggregators.openai_llm_context import (
     OpenAILLMContext,
@@ -47,8 +44,12 @@ from system_instruction import system_instruction
 from turns import turns
 from tools_schema import ToolsSchemaForTest
 import soundfile as sf
-import numpy as np
+from pipecat.transports.base_transport import TransportParams
+from scripts.paced_input_transport import PacedInputTransport
 from pipecat.utils.time import time_now_iso8601
+from scripts.tts_stopped_assistant_transcript import (
+    TTSStoppedAssistantTranscriptProcessor,
+)
 
 load_dotenv()
 
@@ -199,52 +200,19 @@ class RealtimeEOTShim(FrameProcessor):
 
     def __init__(self):
         super().__init__()
-        self._saw_start = False
-        self._buffer = []
+
+    async def push_eot_frames(self):
+        await asyncio.sleep(0.5)
+        ts = OpenAILLMContextAssistantTimestampFrame(timestamp=time_now_iso8601())
+        await self.push_frame(ts)
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, LLMFullResponseStartFrame):
-            self._saw_start = True
-            self._buffer = []
-        elif isinstance(frame, LLMTextFrame):
-            # Collect tokens only if we didn't see an LLM start; otherwise
-            # assistant aggregator will handle aggregation.
-            if not self._saw_start and getattr(frame, "text", None):
-                self._buffer.append(frame.text)
-        elif isinstance(frame, LLMFullResponseEndFrame):
-            # Forward original end frame first
-            await self.push_frame(frame, direction)
+        if isinstance(frame, LLMFullResponseEndFrame):
+            asyncio.create_task(self.push_eot_frames())
 
-            if not self._saw_start:
-                text = "".join(self._buffer).strip()
-                if text:
-                    # Update context via assistant aggregator
-                    append = LLMMessagesAppendFrame(
-                        messages=[{"role": "assistant", "content": text}],
-                        run_llm=False,
-                    )
-                    logger.debug(
-                        f"RealtimeEOTShim: injecting assistant text ({len(text)} chars)"
-                    )
-                    await self.push_frame(append, direction)
-
-                # Always emit a timestamp to close the turn downstream
-                ts = OpenAILLMContextAssistantTimestampFrame(timestamp=time_now_iso8601())
-                logger.debug("RealtimeEOTShim: injecting assistant timestamp frame")
-                await self.push_frame(ts, direction)
-
-            # Reset per-completion state
-            self._saw_start = False
-            self._buffer = []
-            return
-
-        # Default: pass through
         await self.push_frame(frame, direction)
-
-
-# Note: runtime judging has been removed. We judge post-run using the alt judge script.
 
 
 async def main():
@@ -288,8 +256,31 @@ async def main():
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise EnvironmentError("OPENAI_API_KEY is required for OpenAI Realtime models")
-        # todo: switch this over to new OpenAIRealtimeLLMService
-        llm = OpenAIRealtimeAPIBetaLLMService(api_key=api_key)
+        # New OpenAI Realtime LLM Service (non-beta)
+        # Configure server-side turn detection to automatically create a response
+        # when speech stops. This prevents the pipeline from hanging waiting for
+        # a manual response.create after audio has been appended.
+        session_props = rt_events.SessionProperties(
+            # Ask for audio output so we get TTS frames + transcripts
+            output_modalities=["audio"],
+            audio=rt_events.AudioConfiguration(
+                input=rt_events.AudioInput(
+                    # Disable server-side turn detection; we'll explicitly signal stops
+                    turn_detection=False
+                ),
+                # Explicit audio output format keeps expectations consistent
+                output=rt_events.AudioOutput(format=rt_events.PCMAudioFormat()),
+            ),
+            # Do not send full system instructions here; Realtime API enforces
+            # a strict token cap on session.instructions. We instead rely on
+            # lightweight defaults and the conversation itself.
+        )
+        llm = OpenAIRealtimeLLMService(
+            api_key=api_key,
+            model=model_name,
+            system_instruction=system_instruction,
+            session_properties=session_props,
+        )
         llm.register_function(None, function_catchall)
     elif is_bedrock_model(model_name):
         try:
@@ -341,10 +332,13 @@ async def main():
     recorder = RunRecorder(model_name=model_name)
     recorder.start_turn(turn_idx)
 
-    messages = [
-        {"role": "system", "content": system_instruction},
-        {"role": "user", "content": turns[turn_idx]["input"]},
-    ]
+    if is_openai_realtime_model(model_name):
+        messages = []
+    else:
+        messages = [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": turns[turn_idx]["input"]},
+        ]
 
     context = OpenAILLMContext(messages, tools=ToolsSchemaForTest)
     context_aggregator = llm.create_context_aggregator(
@@ -370,6 +364,8 @@ async def main():
 
         # Extract assistant text added since last user message
         msgs = context.get_messages()
+        ltmp = msgs[1:last_msg_idx]
+        logger.info(f"!!!Context: {ltmp}")
         # Skip the system message for logging purposes
         start_i = max(1, last_msg_idx)
         new_msgs = msgs[start_i:]
@@ -416,18 +412,11 @@ async def main():
                     await task.queue_frames([context_aggregator.user().get_context_frame()])
                 else:
                     try:
-                        data, sr = sf.read(audio_path, dtype="int16", always_2d=True)
-                        if data.ndim != 2:
-                            data = np.atleast_2d(data)
-                        num_channels = data.shape[1]
-                        raw = data.tobytes()
-                        frame = InputAudioRawFrame(
-                            audio=raw, sample_rate=int(sr), num_channels=int(num_channels)
-                        )
-                        await task.queue_frames([frame])
+                        assert paced_input is not None
+                        paced_input.enqueue_wav_file(audio_path)
                     except Exception as e:
                         logger.exception(
-                            f"Failed to load audio for turn {turn_idx} from {audio_path}: {e}"
+                            f"Failed to queue audio for turn {turn_idx} from {audio_path}: {e}"
                         )
                         await task.queue_frames([context_aggregator.user().get_context_frame()])
             else:
@@ -441,14 +430,37 @@ async def main():
 
     next_turn = NextTurn(end_of_turn, handle_metrics)
 
+    # Used for speech-to-speech models because LLMTextFrame doesn't work the way it should with the speech-to-speech APIs.
+    # But transcript delivery is flaky. It's hard to tell if this is a Pipecat issue or an API issue.
+    transcript = TranscriptProcessor()
+    assistant_shim = TTSStoppedAssistantTranscriptProcessor()
+
+    paced_input = None
     if is_openai_realtime_model(model_name):
+        # Create a paced input transport set to match the first audio file's sample rate (default 24000 Hz)
+        default_sr = 24000
+        t0_audio = turns[0].get("audio_file")
+        try:
+            if t0_audio:
+                _, t0_sr = sf.read(t0_audio, dtype="int16", always_2d=True)
+                default_sr = int(t0_sr)
+        except Exception:
+            pass
+        input_params = TransportParams(
+            audio_in_enabled=True,
+            audio_in_sample_rate=default_sr,
+            audio_in_channels=1,
+            audio_in_passthrough=True,
+        )
+        paced_input = PacedInputTransport(input_params, pre_roll_ms=100)
+
         pipeline = Pipeline(
             [
-                context_aggregator.user(),  # User responses
+                paced_input,  # paced audio input at realtime pace
+                context_aggregator.user(),  # User text context
                 llm,  # LLM
-                RealtimeEOTShim(),  # Inject EOT + append assistant text if needed
-                context_aggregator.assistant(),  # Assistant responses
-                next_turn,
+                transcript.user(),
+                assistant_shim,  # flushes only on TTSStoppedFrame
             ]
         )
     else:
@@ -463,7 +475,7 @@ async def main():
 
     task = PipelineTask(
         pipeline,
-        idle_timeout_secs=600,
+        idle_timeout_secs=45,
         idle_timeout_frames=(MetricsFrame,),
         params=PipelineParams(
             enable_metrics=True,
@@ -471,25 +483,37 @@ async def main():
         ),
     )
 
+    # Register event handler only for assistant transcript updates
+    @assistant_shim.event_handler("on_transcript_update")
+    async def on_transcript_update(processor, frame):
+        for msg in frame.messages:
+            if isinstance(msg, TranscriptionMessage) and getattr(msg, "role", None) == "assistant":
+                timestamp = f"[{msg.timestamp}] " if msg.timestamp else ""
+                line = f"{timestamp}{msg.role}: {msg.content}"
+                logger.info(f"Transcript: {line}")
+                context.add_messages([{"role": "assistant", "content": msg.content}])
+                # Small delay to let downstream settle, then next turn
+                await asyncio.sleep(0.75)
+                await end_of_turn()
+
+    async def queue_audio_for_first_turn(delay=1.0):
+        # Give the pipeline a moment to start, then enqueue paced audio
+        await asyncio.sleep(delay)
+        audio_path = turns[0].get("audio_file")
+        try:
+            assert paced_input is not None
+            paced_input.enqueue_wav_file(audio_path)
+            logger.info("!!!!!! OpenAI Realtime model - queued paced audio for first turn")
+        except Exception as e:
+            logger.exception(f"Failed to queue audio from {audio_path}: {e}")
+            await task.queue_frames([context_aggregator.user().get_context_frame()])
+
     # Queue first user turn
     last_msg_idx = len(messages)
     if is_openai_realtime_model(model_name):
-        logger.info("!!!!!! OpenAI Realtime model - doing first user turn")
-        # Use the audio file for turn 0 from the turns.py list
-        audio_path = turns[0].get("audio_file")
-        try:
-            data, sr = sf.read(audio_path, dtype="int16", always_2d=True)
-            if data.ndim != 2:
-                data = np.atleast_2d(data)
-            num_channels = data.shape[1]
-            raw = data.tobytes()
-            frame = InputAudioRawFrame(
-                audio=raw, sample_rate=int(sr), num_channels=int(num_channels)
-            )
-            await task.queue_frames([frame])
-        except Exception as e:
-            logger.exception(f"Failed to load audio from {audio_path}: {e}")
-            await task.queue_frames([context_aggregator.user().get_context_frame()])
+        # For Realtime, avoid sending a context frame that would force an early
+        # response.create; let audio + explicit stop drive turn boundaries.
+        asyncio.create_task(queue_audio_for_first_turn())
     else:
         await task.queue_frames([context_aggregator.user().get_context_frame()])
 
