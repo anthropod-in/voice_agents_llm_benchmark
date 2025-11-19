@@ -2,9 +2,10 @@ import os
 import json
 import time
 import asyncio
+import argparse
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, Any, List, Optional
+from typing import Callable, Dict, Any, List, Optional, Set
 
 from loguru import logger
 from dotenv import load_dotenv
@@ -34,8 +35,13 @@ from pipecat.services.gemini_multimodal_live.gemini import (
     GeminiMultimodalLiveLLMService,
 )
 from pipecat.services.openai.base_llm import BaseOpenAILLMService
-from pipecat.services.openai_realtime.openai import OpenAIRealtimeLLMService
-from pipecat.services.openai_realtime import events as rt_events
+try:
+    from pipecat.services.openai_realtime.openai import OpenAIRealtimeLLMService
+    from pipecat.services.openai_realtime import events as rt_events
+except Exception as e:
+    logger.warning(f"OpenAI Realtime imports failed: {e}")
+    OpenAIRealtimeLLMService = None
+    rt_events = None
 from pipecat.processors.aggregators.llm_response import LLMAssistantAggregatorParams
 from pipecat.processors.aggregators.openai_llm_context import (
     OpenAILLMContext,
@@ -56,6 +62,10 @@ from scripts.tts_stopped_assistant_transcript import (
     TTSStoppedAssistantTranscriptProcessor,
 )
 from scripts.tool_call_recorder import ToolCallRecorder
+from gemini_thinking_mode import (
+    create_gemini_thinking_mode_service,
+    GeminiThinkingModeTracker,
+)
 
 load_dotenv()
 
@@ -118,7 +128,11 @@ class RunRecorder:
             self.model_name = model
 
     def record_tool_call(self, name: str, args: Dict[str, Any]):
-        self.turn_calls.append({"name": name, "args": args})
+        # Deduplicate: skip if this exact call was just recorded
+        call_entry = {"name": name, "args": args}
+        if self.turn_calls and self.turn_calls[-1] == call_entry:
+            return  # Skip duplicate
+        self.turn_calls.append(call_entry)
 
     def record_tool_result(self, name: str, response: Dict[str, Any]):
         self.turn_results.append({"name": name, "response": response})
@@ -157,19 +171,41 @@ class RunRecorder:
 # -------------------------
 
 recorder: Optional[RunRecorder] = None
+# Track function calls to deduplicate (Pipecat emits duplicates with/without tool_call_id)
+_executed_function_calls: Set[str] = set()
 
 
 async def function_catchall(params: FunctionCallParams):
     logger.info(f"Function call: {params}")
     # Record tool calls/results
-    global recorder
+    global recorder, _executed_function_calls
+
     try:
         name = getattr(params, "function_name", None)
         args = getattr(params, "arguments", {})
+
+        # Create a hash of the function call to detect duplicates
+        # Pipecat/Gemini emits each call twice: once with tool_call_id, once without
+        import json
+        import hashlib
+        args_dict = dict(args) if isinstance(args, dict) else {"raw": str(args)}
+        call_hash = hashlib.sha256(
+            json.dumps({"name": str(name), "args": args_dict}, sort_keys=True).encode()
+        ).hexdigest()
+
+        # Skip if we've already executed this exact call
+        if call_hash in _executed_function_calls:
+            logger.debug(f"Skipping duplicate function call: {name} (hash: {call_hash[:8]})")
+            # Still need to call result_callback to satisfy Pipecat
+            await params.result_callback({"status": "success"})
+            return
+
+        # Mark as executed
+        _executed_function_calls.add(call_hash)
+        logger.debug(f"Executing function call: {name} (hash: {call_hash[:8]})")
+
         if recorder:
-            recorder.record_tool_call(
-                str(name), dict(args) if isinstance(args, dict) else {"raw": str(args)}
-            )
+            recorder.record_tool_call(str(name), args_dict)
     except Exception:
         pass
     result = {"status": "success"}
@@ -199,6 +235,10 @@ class NextTurn(FrameProcessor):
         # Treat assistant timestamp frame as end-of-turn marker
         if isinstance(frame, OpenAILLMContextAssistantTimestampFrame):
             logger.info("EOT (timestamp)")
+            # Clear function call deduplication set for next turn
+            global _executed_function_calls
+            _executed_function_calls.clear()
+            logger.debug("Cleared function call deduplication set for new turn")
             await self.end_of_turn_callback()
 
 
@@ -228,18 +268,30 @@ class RealtimeEOTShim(FrameProcessor):
 
 
 async def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Run conversation benchmark with various LLM models")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model name (e.g., gpt-4.1, models/gemini-3-pro-preview). Overrides OPENAI_MODEL env var.",
+    )
+    args = parser.parse_args()
+
     turn_idx = 0
 
     # Configure model routing + user field for caching experiments
-    model_name = os.getenv("OPENAI_MODEL", "gpt-4.1")
+    # CLI argument takes precedence over environment variable
+    model_name = args.model if args.model else os.getenv("OPENAI_MODEL", "gpt-4.1")
 
     def is_google_model(name: str) -> bool:
         n = (name or "").lower()
-        return n.startswith("gemini") or n.startswith("gemma")
+        # Handle both "gemini-*" and "models/gemini-*" formats
+        return "gemini" in n or "gemma" in n
 
     def is_gemini_live_model(name: str) -> bool:
         n = (name or "").lower()
-        return n.startswith("gemini") and (
+        return "gemini" in n and (
             "live" in n or "native-audio-dialog" in n
         )
 
@@ -263,6 +315,11 @@ async def main():
     extra = {"user": os.getenv("EVAL_USER", "eval-runner")}
     llm = None
 
+    # Set up recorder early so we can use run_dir for chunk logging
+    global recorder
+    recorder = RunRecorder(model_name=model_name)
+    recorder.start_turn(turn_idx)
+
     if is_gemini_live_model(model_name):
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:
@@ -281,7 +338,19 @@ async def main():
         if not api_key:
             raise EnvironmentError("GOOGLE_API_KEY is required for Google models")
         # Google service handles its own adapter and can upgrade OpenAI context under the hood
-        llm = GoogleLLMService(api_key=api_key, model=model_name)
+        # For gemini-3-pro-preview, use special thinking mode service
+        if "gemini-3-pro-preview" in model_name.lower():
+            # Enable chunk logging for gemini-3-pro-preview
+            chunk_log_path = str(recorder.run_dir / "gemini_chunks.jsonl")
+            llm = create_gemini_thinking_mode_service(
+                api_key=api_key,
+                model=model_name,
+                thinking_budget=64,  # Testing mid-range budget
+                include_thoughts=True,
+                chunk_log_path=chunk_log_path,
+            )
+        else:
+            llm = GoogleLLMService(api_key=api_key, model=model_name)
         llm.register_function(None, function_catchall)
     elif is_openai_realtime_model(model_name):
         api_key = os.getenv("OPENAI_API_KEY")
@@ -341,8 +410,11 @@ async def main():
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
             raise EnvironmentError("OPENROUTER_API_KEY is required for OpenRouter models")
-        # Minimal reasoning applies only to gpt-5 family
-        if model_name.startswith("gpt-5"):
+        # Configure reasoning for gpt-5 family
+        if "gpt-5.1" in model_name:
+            # GPT-5.1 defaults to reasoning=none, don't set parameters
+            pass
+        elif model_name.startswith("gpt-5"):
             extra["reasoning_effort"] = "minimal"
         params = BaseOpenAILLMService.InputParams(extra=extra)
         llm = OpenAILLMService(
@@ -354,16 +426,14 @@ async def main():
         llm.register_function(None, function_catchall)
     else:
         # Default to OpenAI-compatible endpoint using OPENAI_API_KEY
-        if model_name.startswith("gpt-5"):
+        if "gpt-5.1" in model_name:
+            # GPT-5.1 defaults to reasoning=none, don't set parameters
+            pass
+        elif model_name.startswith("gpt-5"):
             extra["reasoning_effort"] = "minimal"
         params = BaseOpenAILLMService.InputParams(extra=extra)
         llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"), model=model_name, params=params)
         llm.register_function(None, function_catchall)
-
-    # Set up recorder
-    global recorder
-    recorder = RunRecorder(model_name=model_name)
-    recorder.start_turn(turn_idx)
 
     if is_openai_realtime_model(model_name) or is_gemini_live_model(model_name):
         messages = []
@@ -380,6 +450,9 @@ async def main():
 
     # Track index into context messages to extract per-turn assistant text
     last_msg_idx = len(messages)
+
+    # Flag to track if we're using thinking mode
+    is_thinking_mode = "gemini-3-pro-preview" in model_name.lower() and is_google_model(model_name)
 
     def handle_metrics(frame: MetricsFrame):
         for md in frame.data:
@@ -529,15 +602,30 @@ async def main():
             ]
         )
     else:
-        pipeline = Pipeline(
-            [
-                context_aggregator.user(),
-                llm,
-                ToolCallRecorder(current_recorder),
-                context_aggregator.assistant(),
-                next_turn,
-            ]
-        )
+        # For gemini-3-pro-preview with thinking mode, add the tracker to handle Content objects
+        if is_google_model(model_name) and "gemini-3-pro-preview" in model_name.lower():
+            from gemini_thinking_mode import GeminiThinkingModeTracker
+            pipeline = Pipeline(
+                [
+                    context_aggregator.user(),
+                    llm,
+                    GeminiThinkingModeTracker(llm, log_thoughts=False),  # Pass llm service to tracker
+                    ToolCallRecorder(current_recorder),
+                    context_aggregator.assistant(),
+                    next_turn,
+                ]
+            )
+        else:
+            # Build standard pipeline for other models
+            pipeline = Pipeline(
+                [
+                    context_aggregator.user(),
+                    llm,
+                    ToolCallRecorder(current_recorder),
+                    context_aggregator.assistant(),
+                    next_turn,
+                ]
+            )
 
     task = PipelineTask(
         pipeline,

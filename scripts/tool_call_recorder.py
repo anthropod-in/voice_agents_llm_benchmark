@@ -23,6 +23,8 @@ class ToolCallRecorder(FrameProcessor):
         # `recorder_ref` is a zero-arg callable returning the current recorder,
         # so we don't capture a stale reference across turns.
         self._recorder_ref = recorder_ref
+        # Track last recorded call to prevent duplicates
+        self._last_recorded_call = None
 
     def _rec(self):
         try:
@@ -33,17 +35,32 @@ class ToolCallRecorder(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
+        # Only process DOWNSTREAM frames to avoid duplication
+        # (LLM service emits frames in both directions)
+        if direction != FrameDirection.DOWNSTREAM:
+            await self.push_frame(frame, direction)
+            return
+
         if isinstance(frame, FunctionCallInProgressFrame):
             rec = self._rec()
             if rec is not None:
                 try:
-                    rec.record_tool_call(
-                        frame.function_name,
-                        {
-                            "tool_call_id": frame.tool_call_id,
-                            **(frame.arguments or {}),
-                        },
-                    )
+                    # Create a tuple for comparison (function_name, args)
+                    current_call = (frame.function_name, str(frame.arguments or {}))
+
+                    # Skip if this is a duplicate of the last recorded call
+                    if current_call == self._last_recorded_call:
+                        logger.debug(
+                            f"ToolCallRecorder: skipping duplicate call to {frame.function_name}"
+                        )
+                    else:
+                        # Keep tool_call_id separate from arguments
+                        rec.record_tool_call(
+                            frame.function_name,
+                            frame.arguments or {},
+                        )
+                        # Update last recorded call
+                        self._last_recorded_call = current_call
                 except Exception as e:
                     logger.debug(f"ToolCallRecorder: failed to record call: {e}")
 
