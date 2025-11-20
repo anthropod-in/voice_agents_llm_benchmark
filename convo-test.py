@@ -27,6 +27,7 @@ from pipecat.frames.frames import (
 from pipecat.metrics.metrics import (
     LLMUsageMetricsData,
     LLMTokenUsage,
+    TTFBMetricsData,
 )
 from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 from pipecat.services.openai.llm import OpenAILLMService
@@ -104,6 +105,7 @@ class RunRecorder:
         self.turn_calls: List[Dict[str, Any]] = []
         self.turn_results: List[Dict[str, Any]] = []
         self.turn_index: int = 0
+        self.turn_llm_ttft: Optional[float] = None  # LLM Time To First Token in seconds
 
         # simple turn counter; judging happens post-run
         self.total_turns_scored = 0
@@ -114,6 +116,7 @@ class RunRecorder:
         self.turn_usage = {}
         self.turn_calls = []
         self.turn_results = []
+        self.turn_llm_ttft = None
 
     def record_usage_metrics(self, m: LLMTokenUsage, model: Optional[str] = None):
         # store last seen usage; fine for turn-local
@@ -126,6 +129,12 @@ class RunRecorder:
         }
         if model:
             self.model_name = model
+
+    def record_ttfb_metrics(self, ttfb_seconds: float):
+        """Store LLM TTFB (Time To First Byte) - effectively TTFT for LLMs.
+        Only captures the first TTFB per turn from LLM processor."""
+        if self.turn_llm_ttft is None:
+            self.turn_llm_ttft = ttfb_seconds
 
     def record_tool_call(self, name: str, args: Dict[str, Any]):
         # Deduplicate: skip if this exact call was just recorded
@@ -142,6 +151,10 @@ class RunRecorder:
         if self.turn_start_monotonic is not None:
             latency_ms = int((time.monotonic() - self.turn_start_monotonic) * 1000)
 
+        llm_ttft_ms = None
+        if self.turn_llm_ttft is not None:
+            llm_ttft_ms = int(self.turn_llm_ttft * 1000)
+
         rec = {
             "ts": now_iso(),
             "turn": self.turn_index,
@@ -152,6 +165,7 @@ class RunRecorder:
             "tool_results": self.turn_results,
             "tokens": self.turn_usage or None,
             "latency_ms": latency_ms,
+            "llm_ttft_ms": llm_ttft_ms,
         }
         self.fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
         self.fp.flush()
@@ -458,6 +472,11 @@ async def main():
         for md in frame.data:
             if isinstance(md, LLMUsageMetricsData):
                 recorder.record_usage_metrics(md.value, getattr(md, "model", None))
+            elif isinstance(md, TTFBMetricsData):
+                # Only capture TTFB from LLM processors (not TTS or other processors)
+                processor_name = getattr(md, "processor", "").lower()
+                if "llm" in processor_name:
+                    recorder.record_ttfb_metrics(md.value)
 
     done = False
 
