@@ -33,6 +33,14 @@ class TTSStoppedAssistantTranscriptProcessor(AssistantTranscriptProcessor):
     - Avoids default flush triggers from AssistantTranscriptProcessor.
     """
 
+    def clear_buffer(self):
+        """Clear accumulated text buffer. Call this during reconnection to discard stale partial responses."""
+        old_parts = getattr(self, "_current_text_parts", [])
+        if old_parts:
+            logger.info(f"[TRANSCRIPT] Clearing {len(old_parts)} accumulated text parts due to reconnection")
+        self._current_text_parts = []
+        self._aggregation_start_time = None
+
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         # Bypass AssistantTranscriptProcessor.process_frame to avoid its default
         # flush triggers. Call the base FrameProcessor implementation directly.
