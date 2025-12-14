@@ -1,94 +1,27 @@
-#!/usr/bin/env python3
-"""
-Conversation test script specifically for AWS Nova Sonic.
+"""Nova Sonic pipeline components for AWS Bedrock Nova Sonic models."""
 
-Nova Sonic has unique behavior that requires special handling:
-1. Speech-to-speech model: audio in, audio out
-2. Requires 16kHz audio input
-3. Text transcripts arrive AFTER audio (8+ seconds delay)
-4. Requires special "trigger" mechanism to start first turn assistant response (Nova Sonic general requirement)
-5. Uses AWAIT_TRIGGER_ASSISTANT_RESPONSE_INSTRUCTION in system instruction
-6. Connection timeout after 8 minutes - handled via automatic reconnection
-
-This script does NOT use NullAudioOutputTransport because BotStoppedSpeakingFrame
-triggers premature response finalization before text arrives from the server.
-
-Reconnection Handling:
-    Nova Sonic has an 8-minute connection limit. When this timeout occurs:
-    1. Pipecat automatically reconnects and reloads conversation context
-    2. NovaSonicTurnEndDetector detects the ErrorFrame with "timed out"
-    3. After a 3-second delay for reconnection, the assistant response is re-triggered
-    4. The conversation continues seamlessly from where it left off
-
-Usage:
-    uv run python convo-test-nova-sonic.py [--model MODEL_NAME]
-"""
-
-import argparse
 import asyncio
 import json
 import time
-from datetime import datetime
-from pathlib import Path
-from typing import Callable, Dict, Any, List, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
 
 from loguru import logger
-from dotenv import load_dotenv
-import os
 
-from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.runner import PipelineRunner
-from pipecat.pipeline.task import PipelineParams, PipelineTask
-from pipecat.services.llm_service import FunctionCallParams
 from pipecat.frames.frames import (
+    DataFrame,
     Frame,
-    MetricsFrame,
-    CancelFrame,
-    ErrorFrame,
+    InputAudioRawFrame,
     LLMFullResponseStartFrame,
     LLMFullResponseEndFrame,
-    TranscriptionMessage,
-    InputAudioRawFrame,
     LLMRunFrame,
-    LLMMessagesAppendFrame,
-    TTSStoppedFrame,
+    MetricsFrame,
     TTSAudioRawFrame,
+    TTSStoppedFrame,
     TTSTextFrame,
 )
-from pipecat.metrics.metrics import (
-    LLMUsageMetricsData,
-    LLMTokenUsage,
-    TTFBMetricsData,
-)
-from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
-from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
-from pipecat.transports.base_transport import TransportParams
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.aws.nova_sonic.llm import AWSNovaSonicLLMService
-
-from turns import turns
-from tools_schema import ToolsSchemaForTest
-from system_instruction_short import system_instruction
-import soundfile as sf
-from scripts.paced_input_transport import PacedInputTransport
-from scripts.tool_call_recorder import ToolCallRecorder
-
-load_dotenv()
-
-# Enable DEBUG logging for Nova Sonic LLM service
-import logging
-
-logging.getLogger("pipecat.services.aws.nova_sonic.llm").setLevel(logging.DEBUG)
-
-logger.info("Starting Nova Sonic conversation test...")
-
-
-# -------------------------
-# Custom Frame for Nova Sonic Completion End
-# -------------------------
-
-from dataclasses import dataclass
-from pipecat.frames.frames import DataFrame
 
 
 @dataclass
@@ -110,11 +43,6 @@ class NovaSonicTextTurnEndFrame(DataFrame):
     indicating that the transcript for this assistant response is complete.
     """
     pass
-
-
-# -------------------------
-# Custom Nova Sonic LLM Service with Completion End Signal
-# -------------------------
 
 
 class NovaSonicLLMServiceWithCompletionSignal(AWSNovaSonicLLMService):
@@ -205,9 +133,13 @@ class NovaSonicLLMServiceWithCompletionSignal(AWSNovaSonicLLMService):
     def _truncate_context_for_reconnection(self):
         """Truncate context for reconnection to fit within Nova Sonic's limits.
 
-        Nova Sonic has strict context limits during session reconnection.
-        Strategy: Keep full system prompt (with KB) but only the most recent user message.
-        This preserves the knowledge base for accurate answers while minimizing history.
+        Nova Sonic has strict context limits during session reconnection (~5-10K chars total).
+        Strategy: Use a minimal system prompt (just core instructions) + most recent 1 turn (2 messages).
+
+        Based on testing:
+        - 21.6K chars: "Chat history is over max limit" error
+        - 10.8K chars: Still too large
+        - Need to stay under ~5K chars total for reliable reconnection
 
         Returns the number of messages removed, or 0 if no truncation was needed.
         """
@@ -228,27 +160,40 @@ class NovaSonicLLMServiceWithCompletionSignal(AWSNovaSonicLLMService):
             else:
                 conversation_messages.append(msg)
 
-        # Find the most recent user message
-        recent_user_message = None
-        for msg in reversed(conversation_messages):
-            if msg.get("role") == "user":
-                recent_user_message = msg
-                break
+        # Use a minimal system prompt for reconnection (~300 chars)
+        # This preserves core behavior while fitting within strict limits
+        minimal_system_prompt = """You are a helpful voice assistant for the AI Engineer World's Fair 2025 (June 3-5, San Francisco).
+Answer questions about the conference schedule, sessions, and speakers.
+Be conversational and concise. If you don't have specific information, say so politely."""
 
-        messages_removed = len(conversation_messages)
-        if recent_user_message:
-            messages_removed -= 1  # We're keeping one message
-
-        if messages_removed > 0:
+        if system_messages:
+            original_content = str(system_messages[0].get("content", ""))
+            original_len = len(original_content)
+            system_messages = [{"role": "system", "content": minimal_system_prompt}]
             logger.warning(
-                f"Truncating context for reconnection: keeping full system prompt + "
-                f"most recent user message. Removing {messages_removed} conversation messages."
+                f"Using minimal system prompt for reconnection: {original_len} chars -> {len(minimal_system_prompt)} chars"
             )
 
-        # Rebuild: system messages + only the most recent user message
-        new_messages = system_messages.copy()
-        if recent_user_message:
-            new_messages.append(recent_user_message)
+        # Keep ZERO conversation messages - Nova Sonic's internal state may be corrupted
+        # after 8-minute timeout, and any conversation history causes "over max limit" errors
+        max_messages = 0
+        if len(conversation_messages) > max_messages:
+            messages_removed = len(conversation_messages)
+            truncated_conversation = []  # Keep nothing
+            logger.warning(
+                f"Truncating conversation for reconnection: keeping last {max_messages} messages. "
+                f"Removing {messages_removed} older messages."
+            )
+        else:
+            messages_removed = 0
+            truncated_conversation = conversation_messages
+            logger.debug(
+                f"Conversation truncation not needed: {len(conversation_messages)} messages "
+                f"<= {max_messages} max"
+            )
+
+        # Rebuild: minimal system + recent conversation
+        new_messages = system_messages + truncated_conversation
 
         # Update the context with truncated messages
         self._context.set_messages(new_messages)
@@ -334,19 +279,15 @@ class NovaSonicLLMServiceWithCompletionSignal(AWSNovaSonicLLMService):
                 logger.warning(f"Error in on_reconnected callback: {e}")
 
         # Re-trigger assistant response if we were in the middle of one
+        # NOTE: Disabled re-trigger after reconnection as it causes "Chat history over max limit"
+        # errors. The user will need to re-send their audio to continue the conversation.
         if self._need_retrigger_after_reconnect:
-            logger.info("Nova Sonic: Re-triggering assistant response after reconnection")
-            # Small delay to let connection stabilize
-            await asyncio.sleep(0.5)
-            await self.trigger_assistant_response()
+            logger.warning(
+                "Nova Sonic: Skipping re-trigger after reconnection (causes errors). "
+                "User must re-send audio to continue."
+            )
             self._need_retrigger_after_reconnect = False
-
-            # Notify turn detector that we've triggered
-            if self._on_retriggered:
-                try:
-                    self._on_retriggered()
-                except Exception as e:
-                    logger.warning(f"Error in on_retriggered callback: {e}")
+            # Don't trigger - let the next user audio input restart the conversation
 
     async def _send_session_start_event(self):
         """Override to add endpointingSensitivity for Nova 2 Sonic VAD control.
@@ -395,6 +336,51 @@ class NovaSonicLLMServiceWithCompletionSignal(AWSNovaSonicLLMService):
         logger.info("NovaSonicLLM: Triggering assistant response")
         await super().trigger_assistant_response()
 
+    async def _receive_task_handler(self):
+        """Override to add custom event handling for turn end detection.
+
+        This extends the parent's receive handler to:
+        1. Track content metadata (type, role, generationStage)
+        2. Emit NovaSonicTextTurnEndFrame when AUDIO ends with END_TURN
+        3. Emit NovaSonicCompletionEndFrame when completionEnd arrives
+        4. Capture TTFB metrics on first audio output
+        """
+        try:
+            while self._stream and not self._disconnecting:
+                output = await self._stream.await_output()
+                result = await output[1].receive()
+
+                if result.value and result.value.bytes_:
+                    response_data = result.value.bytes_.decode("utf-8")
+                    json_data = json.loads(response_data)
+
+                    if "event" in json_data:
+                        event_json = json_data["event"]
+
+                        # Route events to handlers
+                        if "completionStart" in event_json:
+                            await self._handle_completion_start_event(event_json)
+                        elif "contentStart" in event_json:
+                            await self._handle_content_start_event(event_json)
+                        elif "textOutput" in event_json:
+                            await self._handle_text_output_event(event_json)
+                        elif "audioOutput" in event_json:
+                            await self._handle_audio_output_event(event_json)
+                        elif "toolUse" in event_json:
+                            await self._handle_tool_use_event(event_json)
+                        elif "contentEnd" in event_json:
+                            await self._handle_content_end_event(event_json)
+                        elif "completionEnd" in event_json:
+                            await self._handle_completion_end_event(event_json)
+        except Exception as e:
+            if self._disconnecting:
+                logger.debug(f"NovaSonicLLM: _receive_task_handler exception during disconnect: {e}")
+                return
+            logger.error(f"NovaSonicLLM: Error in receive task: {e}")
+            await self.push_error(error_msg=f"Error processing responses: {e}", exception=e)
+            if self._wants_connection:
+                await self.reset_conversation()
+
     async def _handle_completion_start_event(self, event_json):
         """Log when a new completion starts."""
         logger.debug("NovaSonicLLM: === completionStart ===")
@@ -409,7 +395,6 @@ class NovaSonicLLMServiceWithCompletionSignal(AWSNovaSonicLLMService):
         # Parse generationStage from additionalModelFields
         additional = content_start.get("additionalModelFields")
         if additional:
-            import json
             try:
                 fields = json.loads(additional) if isinstance(additional, str) else additional
                 self._current_generation_stage = fields.get("generationStage")
@@ -447,7 +432,7 @@ class NovaSonicLLMServiceWithCompletionSignal(AWSNovaSonicLLMService):
         if (self._current_content_role == "ASSISTANT" and
             self._current_generation_stage == "SPECULATIVE" and
             content):
-            from pipecat.frames.frames import TTSTextFrame, AggregationType
+            from pipecat.frames.frames import AggregationType
             logger.info(f"NovaSonicLLM: Emitting SPECULATIVE text ({len(content)} chars): {content[:60]}...")
             frame = TTSTextFrame(content, aggregated_by=AggregationType.SENTENCE)
             await self.push_frame(frame)
@@ -489,7 +474,7 @@ class NovaSonicLLMServiceWithCompletionSignal(AWSNovaSonicLLMService):
         self._content_depth = max(0, self._content_depth - 1)
 
         logger.debug(
-            f"NovaSonicLLM: <<< contentEnd [{depth_before}→{self._content_depth}] "
+            f"NovaSonicLLM: <<< contentEnd [{depth_before}->{self._content_depth}] "
             f"type={self._current_content_type} role={self._current_content_role} "
             f"stage={self._current_generation_stage} stopReason={stop_reason}"
         )
@@ -515,11 +500,6 @@ class NovaSonicLLMServiceWithCompletionSignal(AWSNovaSonicLLMService):
         """Handle Nova Sonic's completionEnd event by pushing a signal frame."""
         logger.info("NovaSonicLLM: === completionEnd === pushing signal frame")
         await self.push_frame(NovaSonicCompletionEndFrame())
-
-
-# -------------------------
-# Nova Sonic Turn End Detector
-# -------------------------
 
 
 class NovaSonicTurnEndDetector(FrameProcessor):
@@ -639,12 +619,9 @@ class NovaSonicTurnEndDetector(FrameProcessor):
                     self._response_text += text
                     self._last_text_time = time.monotonic()
                     self._start_timeout_check()
-                else:
-                    logger.warning(
-                        f"NovaSonicTurnEndDetector: IGNORING late text ({len(text)} chars) - "
-                        f"waiting={self._waiting_for_response}, active={self._response_active}, "
-                        f"processing={self._processing_turn_end}"
-                    )
+                # else: Ignore FINAL text chunks that arrive after turn completion.
+                # Nova Sonic sends text twice: SPECULATIVE (with audio) and FINAL (4-6s later).
+                # We capture SPECULATIVE text during the turn, so FINAL chunks are duplicates.
 
         # Handle Nova Sonic text turn end signal - transcript is now complete!
         # This is the most reliable signal that all text for this turn has arrived.
@@ -876,465 +853,371 @@ class NovaSonicTurnEndDetector(FrameProcessor):
         self._text_turn_ended = False
 
 
-# -------------------------
-# Utilities for persistence
-# -------------------------
+# ============================================================================
+# Nova Sonic Pipeline
+# ============================================================================
 
 
-def now_iso() -> str:
-    try:
-        from datetime import UTC
+class NovaSonicPipeline:
+    """Pipeline for AWS Nova Sonic speech-to-speech models.
 
-        return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    except Exception:
-        return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+    Nova Sonic has unique behavior that requires special handling:
+    1. Speech-to-speech model: audio in, audio out
+    2. Requires 16kHz audio input
+    3. Text transcripts arrive AFTER audio (8+ seconds delay)
+    4. Requires special "trigger" mechanism to start assistant response
+    5. Uses AWAIT_TRIGGER_ASSISTANT_RESPONSE_INSTRUCTION in system instruction
+    6. Connection timeout after 8 minutes - handled via automatic reconnection
 
+    This pipeline creates its own LLM service (requires_service=False).
+    """
 
-class RunRecorder:
-    """Accumulates per-turn data and writes JSONL + summary."""
+    requires_service = False  # We create our own LLM
 
-    def __init__(self, model_name: str):
-        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-        self.run_dir = Path("runs") / f"nova-sonic-{ts}"
-        self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.out_path = self.run_dir / "transcript.jsonl"
-        self.fp = self.out_path.open("a", encoding="utf-8")
-        self.model_name = model_name
+    def __init__(self, benchmark):
+        """Initialize the pipeline.
 
-        # per-turn working state
-        self.turn_start_monotonic: Optional[float] = None
-        self.turn_usage: Dict[str, Any] = {}
-        self.turn_calls: List[Dict[str, Any]] = []
-        self.turn_results: List[Dict[str, Any]] = []
-        self.turn_index: int = 0
-        self.turn_ttfb_ms: Optional[int] = None
-
-        self.total_turns_scored = 0
-
-    def start_turn(self, turn_index: int):
-        self.turn_index = turn_index
-        self.turn_start_monotonic = time.monotonic()
-        self.turn_usage = {}
-        self.turn_calls = []
-        self.turn_results = []
-        self.turn_ttfb_ms = None
-
-    def record_ttfb(self, ttfb_seconds: float):
-        ttfb_ms = int(ttfb_seconds * 1000)
-        logger.debug(f"TurnRecorder: record_ttfb called with {ttfb_seconds:.3f}s ({ttfb_ms}ms), current={self.turn_ttfb_ms}")
-        if self.turn_ttfb_ms is None:
-            self.turn_ttfb_ms = ttfb_ms
-            logger.debug(f"TurnRecorder: set turn_ttfb_ms = {ttfb_ms}")
-        else:
-            logger.debug(f"TurnRecorder: IGNORING - already set to {self.turn_ttfb_ms}")
-
-    def reset_ttfb(self):
-        """Reset TTFB to None, allowing it to be set again.
-
-        Call this when starting TTFB timing for a new turn to ensure
-        spurious TTFB values from pipeline initialization don't interfere.
+        Args:
+            benchmark: A BenchmarkConfig instance with turns, tools, and system instruction.
         """
-        if self.turn_ttfb_ms is not None:
-            logger.debug(f"TurnRecorder: Resetting TTFB (was {self.turn_ttfb_ms})")
-        self.turn_ttfb_ms = None
+        import os
 
-    def record_usage_metrics(self, m: LLMTokenUsage, model: Optional[str] = None):
-        self.turn_usage = {
-            "prompt_tokens": m.prompt_tokens,
-            "completion_tokens": m.completion_tokens,
-            "total_tokens": m.total_tokens,
-            "cache_read_input_tokens": m.cache_read_input_tokens,
-            "cache_creation_input_tokens": m.cache_creation_input_tokens,
-        }
-        if model:
-            self.model_name = model
+        self.benchmark = benchmark
+        self.turns = benchmark.turns
+        self.turn_idx = 0
+        self.done = False
+        self.recorder = None
+        self.task = None
+        self.context = None
+        self.llm = None
+        self.model_name = None
+        self._turn_indices = None
 
-    def record_tool_call(self, name: str, args: Dict[str, Any]):
-        self.turn_calls.append({"name": name, "args": args})
+        # Nova Sonic specific
+        self.paced_input = None
+        self.turn_detector = None
+        self.context_aggregator = None
 
-    def record_tool_result(self, name: str, response: Dict[str, Any]):
-        self.turn_results.append({"name": name, "response": response})
+        # AWS credentials (needed for LLM creation)
+        self._aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
+        self._aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+        self._aws_session_token = os.getenv("AWS_SESSION_TOKEN")
+        self._aws_region = os.getenv("AWS_REGION", "us-east-1")
 
-    def write_turn(self, *, user_text: str, assistant_text: str):
-        latency_ms = None
-        if self.turn_start_monotonic is not None:
-            latency_ms = int((time.monotonic() - self.turn_start_monotonic) * 1000)
+    @property
+    def effective_turns(self):
+        """Get the turns to run (filtered by turn_indices if set)."""
+        if self._turn_indices is not None:
+            return [self.turns[i] for i in self._turn_indices if i < len(self.turns)]
+        return self.turns
 
-        rec = {
-            "ts": now_iso(),
-            "turn": self.turn_index,
-            "model_name": self.model_name,
-            "user_text": user_text,
-            "assistant_text": assistant_text,
-            "tool_calls": self.turn_calls,
-            "tool_results": self.turn_results,
-            "tokens": self.turn_usage or None,
-            "ttfb_ms": self.turn_ttfb_ms,
-            "latency_ms": latency_ms,
-        }
-        self.fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        self.fp.flush()
-        self.total_turns_scored += 1
-        logger.info(f"Recorded turn {self.turn_index}: {assistant_text[:100]}...")
+    def _get_actual_turn_index(self, effective_index: int) -> int:
+        """Convert effective turn index to actual turn index."""
+        if self._turn_indices is not None:
+            return self._turn_indices[effective_index]
+        return effective_index
 
-    def write_summary(self):
-        runtime = {
-            "model_name": self.model_name,
-            "turns": self.total_turns_scored,
-            "note": "Nova Sonic specific test run",
-        }
-        (self.run_dir / "runtime.json").write_text(json.dumps(runtime, indent=2), encoding="utf-8")
+    def _get_current_turn(self) -> dict:
+        """Get the current turn data."""
+        return self.effective_turns[self.turn_idx]
 
+    def _get_audio_path_for_turn(self, turn_index: int):
+        """Get the audio file path for a turn.
 
-# -------------------------
-# Tool call stub
-# -------------------------
+        Prefers benchmark.get_audio_path() if available, falls back to
+        the turn's audio_file field.
 
-recorder: Optional[RunRecorder] = None
+        Args:
+            turn_index: The effective turn index (index into effective_turns).
 
+        Returns:
+            Path to audio file as string, or None if not available.
+        """
+        from pathlib import Path
 
-async def function_catchall(params: FunctionCallParams):
-    logger.info(f"Function call: {params}")
-    result = {"status": "success"}
-    await params.result_callback(result)
+        # Try benchmark's get_audio_path method first (uses audio_dir)
+        if hasattr(self.benchmark, "get_audio_path"):
+            actual_index = self._get_actual_turn_index(turn_index)
+            path = self.benchmark.get_audio_path(actual_index)
+            if path and path.exists():
+                return str(path)
 
+        # Fall back to turn's audio_file field
+        turn = self.effective_turns[turn_index]
+        return turn.get("audio_file")
 
-# -------------------------
-# Frame logger for debugging
-# -------------------------
+    async def run(
+        self,
+        recorder,
+        model: str,
+        service_class=None,
+        turn_indices=None,
+    ) -> None:
+        """Run the complete benchmark.
 
+        Args:
+            recorder: TranscriptRecorder for saving results.
+            model: Model name/identifier.
+            service_class: Ignored for Nova Sonic (we create our own LLM).
+            turn_indices: Optional list of turn indices to run (for debugging).
+        """
+        import os
+        import soundfile as sf
+        from pathlib import Path
 
-class FrameLogger(FrameProcessor):
-    """Logs frames passing through the pipeline."""
+        from pipecat.pipeline.pipeline import Pipeline
+        from pipecat.pipeline.runner import PipelineRunner
+        from pipecat.pipeline.task import PipelineParams, PipelineTask
+        from pipecat.processors.aggregators.llm_context import LLMContext
+        from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+        from pipecat.transports.base_transport import TransportParams
 
-    def __init__(self, name: str = "FrameLogger"):
-        super().__init__()
-        self._name = name
-        self._input_audio_count = 0
-        self._output_audio_count = 0
+        from multi_turn_eval.processors.tool_call_recorder import ToolCallRecorder
+        from multi_turn_eval.transports.paced_input import PacedInputTransport
 
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
+        self.recorder = recorder
+        self.model_name = model
+        self._turn_indices = turn_indices
 
-        # Track audio frames with periodic logging
-        if isinstance(frame, InputAudioRawFrame):
-            self._input_audio_count += 1
-            if self._input_audio_count == 1 or self._input_audio_count % 100 == 0:
-                logger.info(
-                    f"[{self._name}] InputAudioRawFrame #{self._input_audio_count} ({len(frame.audio)} bytes)"
-                )
-        elif isinstance(frame, TTSAudioRawFrame):
-            self._output_audio_count += 1
-            if self._output_audio_count == 1 or self._output_audio_count % 100 == 0:
-                logger.info(
-                    f"[{self._name}] TTSAudioRawFrame #{self._output_audio_count} ({len(frame.audio)} bytes)"
-                )
-        elif isinstance(frame, TranscriptionMessage):
-            logger.info(
-                f"[{self._name}] TranscriptionMessage: '{frame.message}' (role={frame.role})"
+        # Validate AWS credentials
+        if not (self._aws_access_key_id and self._aws_secret_access_key):
+            raise EnvironmentError(
+                "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are required for Nova Sonic"
             )
-        else:
-            logger.debug(f"[{self._name}] {frame.__class__.__name__} ({direction})")
 
-        await self.push_frame(frame, direction)
+        # Get system instruction and tools from benchmark
+        system_instruction = getattr(self.benchmark, "system_instruction", "")
+        tools = getattr(self.benchmark, "tools_schema", None)
 
+        # Nova Sonic requires the trigger instruction appended to system instruction
+        from pipecat.services.aws.nova_sonic.llm import AWSNovaSonicLLMService
 
-# -------------------------
-# Main
-# -------------------------
+        nova_sonic_system_instruction = (
+            f"{system_instruction} "
+            f"{AWSNovaSonicLLMService.AWAIT_TRIGGER_ASSISTANT_RESPONSE_INSTRUCTION}"
+        )
+        logger.info(f"Using full system instruction ({len(nova_sonic_system_instruction)} chars)")
 
-
-async def main(model_name: str, max_turns: Optional[int] = None, vad_sensitivity: Optional[str] = None):
-    turn_idx = 0
-
-    # Validate model name
-    n = model_name.lower()
-    if "nova-sonic" not in n and "nova_sonic" not in n:
-        logger.warning(f"Model '{model_name}' may not be a Nova Sonic model. Proceeding anyway.")
-
-    # Warn about VAD sensitivity on Nova Sonic v1
-    if vad_sensitivity and "nova-2-sonic" not in model_name.lower():
-        logger.warning(
-            f"VAD sensitivity '{vad_sensitivity}' is only supported by Nova 2 Sonic. "
-            f"Model '{model_name}' may ignore this parameter."
+        # Create Nova Sonic LLM service
+        self.llm = NovaSonicLLMServiceWithCompletionSignal(
+            secret_access_key=self._aws_secret_access_key,
+            access_key_id=self._aws_access_key_id,
+            session_token=self._aws_session_token,
+            region=self._aws_region,
+            model=model if ":" in model else "amazon.nova-sonic-v1:0",
+            voice_id="tiffany",
+            system_instruction=nova_sonic_system_instruction,
+            tools=tools,
+            endpointing_sensitivity="HIGH",  # Quick cutoff for faster responses
         )
 
-    # AWS credentials
-    aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
-    aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-    aws_session_token = os.getenv("AWS_SESSION_TOKEN")
-    aws_region = os.getenv("AWS_REGION", "us-east-1")
+        # Register function handler
+        from pipecat.services.llm_service import FunctionCallParams
 
-    if not (aws_access_key_id and aws_secret_access_key):
-        raise EnvironmentError(
-            "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are required for Nova Sonic"
-        )
+        async def function_catchall(params: FunctionCallParams):
+            # Create a key for duplicate detection (function_name + args)
+            call_key = (params.function_name, str(params.arguments or {}))
 
-    # Nova Sonic requires the trigger instruction appended to system instruction
-    nova_sonic_system_instruction = (
-        f"{system_instruction} "
-        f"{AWSNovaSonicLLMService.AWAIT_TRIGGER_ASSISTANT_RESPONSE_INSTRUCTION}"
-    )
-    logger.info(f"Using full system instruction ({len(nova_sonic_system_instruction)} chars)")
-
-    # Create Nova Sonic LLM service with completion end signal
-    # Using our custom subclass that emits NovaSonicCompletionEndFrame
-    llm = NovaSonicLLMServiceWithCompletionSignal(
-        secret_access_key=aws_secret_access_key,
-        access_key_id=aws_access_key_id,
-        session_token=aws_session_token,
-        region=aws_region,
-        model=model_name if ":" in model_name else "amazon.nova-sonic-v1:0",
-        voice_id="tiffany",
-        system_instruction=nova_sonic_system_instruction,
-        tools=ToolsSchemaForTest,
-        endpointing_sensitivity=vad_sensitivity,  # VAD control for Nova 2 Sonic
-    )
-    llm.register_function(None, function_catchall)
-
-    # Set up recorder
-    global recorder
-    recorder = RunRecorder(model_name=model_name)
-    recorder.start_turn(turn_idx)
-
-    # Context - Nova Sonic ONLY accepts SPEECH input (not text!)
-    # We provide a system message but NO user message
-    # The user's question comes as AUDIO via PacedInputTransport
-    messages = [
-        {"role": "system", "content": system_instruction},
-        # NO user message - Nova Sonic only accepts audio input!
-    ]
-    context = LLMContext(messages, tools=ToolsSchemaForTest)
-    logger.info("Context initialized (user input will be audio, not text)")
-    logger.info(f"Context messages count: {len(context.get_messages())}")
-    for i, msg in enumerate(context.get_messages()):
-        logger.info(
-            f"  Message {i}: role={msg.get('role')}, content_len={len(str(msg.get('content', '')))}"
-        )
-    context_aggregator = LLMContextAggregatorPair(context)
-
-    # Pipeline task reference (will be set after task creation)
-    task: Optional[PipelineTask] = None
-    done = False
-
-    def handle_metrics(frame: MetricsFrame):
-        for md in frame.data:
-            if isinstance(md, LLMUsageMetricsData):
-                recorder.record_usage_metrics(md.value, getattr(md, "model", None))
-            elif isinstance(md, TTFBMetricsData):
-                recorder.record_ttfb(md.value)
-
-    async def end_of_turn(assistant_text: str):
-        """Called when turn detector determines response is complete."""
-        nonlocal turn_idx, done
-
-        if done:
-            logger.info("end_of_turn called but already done")
-            return
-
-        # Record this turn
-        recorder.write_turn(
-            user_text=turns[turn_idx].get("input", ""),
-            assistant_text=assistant_text,
-        )
-
-        # Reset reconnect counter on successful turn completion
-        # This allows fresh reconnection attempts for subsequent turns
-        llm.reset_reconnect_counter()
-
-        turn_idx += 1
-
-        # Check if we should continue - respect max_turns limit
-        turn_limit = max_turns if max_turns else len(turns)
-        if turn_idx < turn_limit:
-            recorder.start_turn(turn_idx)
-            logger.info(f"Starting turn {turn_idx}: {turns[turn_idx]['input'][:50]}...")
-
-            # Queue audio for next turn
-            audio_path = turns[turn_idx].get("audio_file")
-            if audio_path and paced_input:
-                try:
-                    # Wait before starting next turn to let Nova Sonic settle
-                    # This helps avoid "I didn't catch that" recognition errors
-                    logger.info("Waiting 3s before starting next turn...")
-                    await asyncio.sleep(3.0)
-
-                    # Calculate audio duration to know when it will finish streaming
-                    data, sr = sf.read(audio_path, dtype="int16")
-                    audio_duration_sec = len(data) / sr
-                    logger.info(f"Audio duration for turn {turn_idx}: {audio_duration_sec:.2f}s")
-
-                    paced_input.enqueue_wav_file(audio_path)
-                    logger.info(f"Queued audio for turn {turn_idx}")
-
-                    # Wait for audio to finish streaming
-                    wait_time = audio_duration_sec + 0.5
-                    logger.info(f"Waiting {wait_time:.2f}s for audio to finish streaming...")
-                    await asyncio.sleep(wait_time)
-
-                    # Start TTFB timing now that user audio is complete
-                    recorder.reset_ttfb()  # Clear any spurious TTFB from earlier
-                    await llm.start_ttfb_for_user_audio_complete()
-
-                    await llm.trigger_assistant_response()
-                    turn_detector.signal_trigger_sent()
-                    logger.info(f"Triggered assistant response for turn {turn_idx}")
-                except Exception as e:
-                    logger.exception(f"Failed to queue audio for turn {turn_idx}: {e}")
-                    # Fall back to text
-                    await task.queue_frames(
-                        [
-                            LLMMessagesAppendFrame(
-                                messages=[{"role": "user", "content": turns[turn_idx]["input"]}],
-                                run_llm=False,
-                            )
-                        ]
-                    )
-                    await asyncio.sleep(0.5)
-                    await llm.trigger_assistant_response()
-                    turn_detector.signal_trigger_sent()
-            else:
-                # No audio file, use text
-                await task.queue_frames(
-                    [
-                        LLMMessagesAppendFrame(
-                            messages=[{"role": "user", "content": turns[turn_idx]["input"]}],
-                            run_llm=False,
-                        )
-                    ]
+            # Check for duplicate tool call
+            if call_key in self._seen_tool_calls:
+                logger.warning(
+                    f"Skipping duplicate tool call: {params.function_name} "
+                    f"(tool_call_id={getattr(params, 'tool_call_id', 'unknown')})"
                 )
-                await asyncio.sleep(0.5)
-                await llm.trigger_assistant_response()
-                turn_detector.signal_trigger_sent()
-        else:
-            logger.info("Conversation complete!")
-            recorder.write_summary()
-            done = True
-            # Cancel the task to properly shut down the pipeline
-            await task.cancel()
+                await params.result_callback({"status": "duplicate_skipped"})
+                return
 
-    # Create turn detector
-    # Strategy:
-    # - We use SPECULATIVE text which arrives in real-time with audio
-    # - AUDIO END_TURN signals when the assistant is done speaking
-    # - Short timeout after audio ends to collect any final text chunks
-    turn_detector = NovaSonicTurnEndDetector(
-        end_of_turn_callback=end_of_turn,
-        text_timeout_sec=5.0,  # Fallback: wait 5s after last text if no END_TURN
-        post_completion_timeout_sec=2.0,  # After audio stops: wait 2s for stragglers
-        response_timeout_sec=60.0,  # If no response within 60s after trigger, skip
-        metrics_callback=handle_metrics,
-    )
+            # Track this call
+            self._seen_tool_calls.add(call_key)
 
-    # Create paced input transport for audio
-    # Nova Sonic requires 16kHz input
-    input_params = TransportParams(
-        audio_in_enabled=True,
-        audio_in_sample_rate=16000,
-        audio_in_channels=1,
-        audio_in_passthrough=True,
-    )
-    paced_input = PacedInputTransport(
-        input_params,
-        pre_roll_ms=100,
-        continuous_silence=True,
-        wait_for_ready=True,  # Wait for LLM to be ready before sending audio
-    )
+            logger.info(f"Function call: {params}")
+            result = {"status": "success"}
+            await params.result_callback(result)
 
-    # Set up reconnection callbacks now that paced_input and turn_detector exist
-    # These callbacks coordinate audio pause/resume during Nova Sonic reconnection
-    def on_reconnecting():
-        """Called when Nova Sonic starts reconnecting - pause audio input."""
-        logger.info("Reconnection starting: pausing audio input and resetting turn detector")
-        paced_input.pause()
-        turn_detector.reset_for_reconnection()
+        self.llm.register_function(None, function_catchall)
 
-    def on_reconnected():
-        """Called when Nova Sonic reconnection completes - resume audio input."""
-        logger.info("Reconnection complete: resuming audio input")
-        paced_input.signal_ready()
-
-    def on_retriggered():
-        """Called after assistant response is re-triggered - notify turn detector."""
-        logger.info("Assistant response re-triggered after reconnection, signaling turn detector")
-        turn_detector.signal_trigger_sent()
-
-    async def on_max_reconnects_exceeded():
-        """Called when max reconnection attempts exceeded - terminate gracefully."""
-        nonlocal done
-        logger.error("Max reconnect attempts exceeded - terminating pipeline")
-        done = True
-        recorder.write_summary()
-        await task.cancel()
-
-    # Set the callbacks on the LLM (they're closures that capture paced_input and turn_detector)
-    llm._on_reconnecting = on_reconnecting
-    llm._on_reconnected = on_reconnected
-    llm._on_retriggered = on_retriggered
-    llm._on_max_reconnects_exceeded = on_max_reconnects_exceeded
-
-    # Recorder accessor for ToolCallRecorder
-    def current_recorder():
-        global recorder
-        return recorder
-
-    # Build pipeline
-    # NOTE: No NullAudioOutputTransport! It causes BotStoppedSpeakingFrame too quickly,
-    # which sets _assistant_is_responding = False and text gets ignored.
-    # We rely on TTSStoppedFrame for turn end detection instead.
-    pipeline = Pipeline(
-        [
-            paced_input,
-            context_aggregator.user(),
-            FrameLogger("PreLLM"),
-            llm,
-            FrameLogger("PostLLM"),
-            ToolCallRecorder(current_recorder),
-            turn_detector,  # Detects turn end based on TTSStoppedFrame
-            context_aggregator.assistant(),
+        # Create context - Nova Sonic only accepts SPEECH input, so no user message
+        messages = [
+            {"role": "system", "content": system_instruction},
         ]
-    )
+        self.context = LLMContext(messages, tools=tools)
+        self.context_aggregator = LLMContextAggregatorPair(self.context)
 
-    task = PipelineTask(
-        pipeline,
-        idle_timeout_secs=60,  # Longer timeout for Nova Sonic's delayed responses
-        # These frames reset the idle timer when received
-        idle_timeout_frames=(TTSAudioRawFrame, TTSTextFrame, InputAudioRawFrame, MetricsFrame),
-        params=PipelineParams(
-            enable_metrics=True,
-            enable_usage_metrics=True,
-        ),
-    )
+        # Metrics handler
+        def handle_metrics(frame: MetricsFrame):
+            from pipecat.metrics.metrics import LLMUsageMetricsData, TTFBMetricsData
 
-    # NOTE: PipelineTask doesn't support @task.event_handler("on_error") - it never fires.
-    # Instead, we use the on_max_reconnects_exceeded callback in the LLM service to handle
-    # graceful termination when max reconnection attempts are exceeded.
+            for md in frame.data:
+                if isinstance(md, LLMUsageMetricsData):
+                    self.recorder.record_usage_metrics(md.value, getattr(md, "model", None))
+                elif isinstance(md, TTFBMetricsData):
+                    self.recorder.record_ttfb(md.value)
 
-    async def queue_first_turn(delay: float = 1.0):
+        # End of turn callback
+        async def end_of_turn(assistant_text: str):
+            if self.done:
+                logger.info("end_of_turn called but already done")
+                return
+
+            # Record this turn
+            self.recorder.write_turn(
+                user_text=self._get_current_turn().get("input", ""),
+                assistant_text=assistant_text,
+            )
+
+            # Reset reconnect counter on successful turn completion
+            self.llm.reset_reconnect_counter()
+
+            self.turn_idx += 1
+
+            # Reset tool call tracking for the new turn
+            self._seen_tool_calls.clear()
+
+            if self.turn_idx < len(self.effective_turns):
+                actual_idx = self._get_actual_turn_index(self.turn_idx)
+                self.recorder.start_turn(actual_idx)
+                logger.info(f"Starting turn {self.turn_idx}: {self._get_current_turn()['input'][:50]}...")
+                await self._queue_next_turn()
+            else:
+                logger.info("Conversation complete!")
+                self.recorder.write_summary()
+                self.done = True
+                await self.task.cancel()
+
+        # Create turn detector
+        self.turn_detector = NovaSonicTurnEndDetector(
+            end_of_turn_callback=end_of_turn,
+            text_timeout_sec=5.0,
+            post_completion_timeout_sec=2.0,
+            response_timeout_sec=60.0,
+            metrics_callback=handle_metrics,
+        )
+
+        # Create paced input transport (Nova Sonic requires 16kHz)
+        input_params = TransportParams(
+            audio_in_enabled=True,
+            audio_in_sample_rate=16000,
+            audio_in_channels=1,
+            audio_in_passthrough=True,
+        )
+        self.paced_input = PacedInputTransport(
+            input_params,
+            pre_roll_ms=100,
+            continuous_silence=True,
+            wait_for_ready=True,  # Wait for LLM to be ready before sending audio
+        )
+
+        # Set up reconnection callbacks
+        def on_reconnecting():
+            logger.info("Reconnection starting: pausing audio input and resetting turn detector")
+            self.paced_input.pause()
+            self.turn_detector.reset_for_reconnection()
+
+        def on_reconnected():
+            logger.info("Reconnection complete: waiting 2s before resuming audio")
+            import threading
+
+            def delayed_signal():
+                import time
+
+                time.sleep(2.0)
+                logger.info("Delayed audio resume: signaling ready now")
+                self.paced_input.signal_ready()
+
+            threading.Thread(target=delayed_signal, daemon=True).start()
+
+        def on_retriggered():
+            logger.info("Assistant response re-triggered after reconnection")
+            self.turn_detector.signal_trigger_sent()
+
+        async def on_max_reconnects_exceeded():
+            logger.error("Max reconnect attempts exceeded - terminating pipeline")
+            self.done = True
+            self.recorder.write_summary()
+            await self.task.cancel()
+
+        self.llm._on_reconnecting = on_reconnecting
+        self.llm._on_reconnected = on_reconnected
+        self.llm._on_retriggered = on_retriggered
+        self.llm._on_max_reconnects_exceeded = on_max_reconnects_exceeded
+
+        # Recorder accessor for ToolCallRecorder
+        def recorder_accessor():
+            return self.recorder
+
+        def duplicate_ids_accessor():
+            return self._duplicate_tool_call_ids
+
+        # Build pipeline
+        pipeline = Pipeline(
+            [
+                self.paced_input,
+                self.context_aggregator.user(),
+                self.llm,
+                ToolCallRecorder(recorder_accessor, duplicate_ids_accessor),
+                self.turn_detector,
+                self.context_aggregator.assistant(),
+            ]
+        )
+
+        self.task = PipelineTask(
+            pipeline,
+            idle_timeout_secs=60,  # Longer timeout for Nova Sonic's delayed responses
+            idle_timeout_frames=(TTSAudioRawFrame, TTSTextFrame, InputAudioRawFrame, MetricsFrame),
+            params=PipelineParams(
+                enable_metrics=True,
+                enable_usage_metrics=True,
+            ),
+        )
+
+        # Initialize first turn
+        actual_first_idx = self._get_actual_turn_index(0)
+        self.recorder.start_turn(actual_first_idx)
+
+        # Queue first turn
+        asyncio.create_task(self._queue_first_turn())
+
+        # Run pipeline
+        runner = PipelineRunner(handle_sigint=True)
+        await runner.run(self.task)
+
+    async def _queue_first_turn(self, delay: float = 1.0):
         """Queue the first turn - send user question as AUDIO, then trigger."""
+        import soundfile as sf
+        from pathlib import Path
+
+        from pipecat.frames.frames import LLMRunFrame
+
         await asyncio.sleep(delay)
 
         # Queue LLMRunFrame to establish connection
         logger.info("Queuing LLMRunFrame to establish connection...")
-        await task.queue_frames([LLMRunFrame()])
+        await self.task.queue_frames([LLMRunFrame()])
 
         # Wait for connection to establish
         await asyncio.sleep(1.0)
 
         # Signal LLM ready to receive audio
         logger.info("Signaling LLM ready for audio...")
-        paced_input.signal_ready()
+        self.paced_input.signal_ready()
 
-        # Queue user's question as AUDIO (Nova Sonic only accepts speech input!)
-        audio_path = turns[0].get("audio_file")
+        # Queue user's question as AUDIO
+        turn = self._get_current_turn()
+        audio_path = self._get_audio_path_for_turn(self.turn_idx)
         if audio_path:
             # Calculate audio duration
             data, sr = sf.read(audio_path, dtype="int16")
             audio_duration_sec = len(data) / sr
             logger.info(f"Audio duration: {audio_duration_sec:.2f}s")
 
-            paced_input.enqueue_wav_file(audio_path)
+            self.paced_input.enqueue_wav_file(audio_path)
             logger.info(f"Queued user question audio: {audio_path}")
+
+            # Signal trigger as soon as we start sending audio.
+            # This tells the turn detector to start accepting text.
+            # We don't send audio until previous turn ended, so we can safely
+            # clear buffers and accept any incoming text from this point.
+            self.turn_detector.signal_trigger_sent()
 
             # Wait for audio to finish streaming (plus small buffer)
             wait_time = audio_duration_sec + 0.5
@@ -1342,73 +1225,101 @@ async def main(model_name: str, max_turns: Optional[int] = None, vad_sensitivity
             await asyncio.sleep(wait_time)
 
             # Start TTFB timing now that user audio is complete
-            recorder.reset_ttfb()  # Clear any spurious TTFB from initialization
-            await llm.start_ttfb_for_user_audio_complete()
+            self.recorder.reset_ttfb()
+            await self.llm.start_ttfb_for_user_audio_complete()
 
-            # NOW trigger assistant response (after user audio is sent)
+            # Trigger assistant response
+            # Nova Sonic v1 needs explicit audio trigger, Nova 2 Sonic auto-triggers via VAD
             logger.info("Triggering assistant response after user audio...")
-            await llm.trigger_assistant_response()
-            turn_detector.signal_trigger_sent()
+            if self.llm._is_assistant_response_trigger_needed():
+                await self.llm.trigger_assistant_response()
+            else:
+                # Nova 2 Sonic - send LLMRunFrame to trigger context push
+                logger.info("Using LLMRunFrame for Nova 2 Sonic")
+                await self.task.queue_frames([LLMRunFrame()])
             logger.info("Triggered assistant response")
         else:
             logger.error("No audio file for first turn - Nova Sonic requires audio input!")
-            await task.cancel()
+            await self.task.cancel()
 
-    # Start first turn
-    asyncio.create_task(queue_first_turn())
+    async def _queue_next_turn(self):
+        """Queue audio for the next turn."""
+        import soundfile as sf
+        from pathlib import Path
 
-    # Run pipeline
-    runner = PipelineRunner(handle_sigint=True)
-    await runner.run(task)
+        from pipecat.frames.frames import LLMMessagesAppendFrame
 
+        turn = self._get_current_turn()
+        audio_path = self._get_audio_path_for_turn(self.turn_idx)
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Conversation test for AWS Nova Sonic",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-    uv run python convo-test-nova-sonic.py
-    uv run python convo-test-nova-sonic.py --model amazon.nova-sonic-v1:0
-    uv run python convo-test-nova-sonic.py --model amazon.nova-2-sonic-v1:0 --vad-sensitivity LOW
+        if audio_path:
+            try:
+                # Wait before starting next turn to let Nova Sonic settle
+                logger.info("Waiting 5s before starting next turn...")
+                await asyncio.sleep(5.0)
 
-VAD Configuration (Nova 2 Sonic only):
-    Nova Sonic v1 does NOT support VAD configuration.
-    Nova 2 Sonic supports endpointingSensitivity:
-    - HIGH:   Very sensitive to pauses (quick cutoff, may interrupt user)
-    - MEDIUM: Balanced sensitivity (default)
-    - LOW:    Less sensitive to pauses (longer wait before cutoff)
+                # Calculate audio duration
+                data, sr = sf.read(audio_path, dtype="int16")
+                audio_duration_sec = len(data) / sr
+                logger.info(f"Audio duration for turn {self.turn_idx}: {audio_duration_sec:.2f}s")
 
-Environment variables:
-    AWS_ACCESS_KEY_ID     - AWS access key (required)
-    AWS_SECRET_ACCESS_KEY - AWS secret key (required)
-    AWS_SESSION_TOKEN     - AWS session token (optional)
-    AWS_REGION            - AWS region (default: us-east-1)
-""",
-    )
-    parser.add_argument(
-        "--model",
-        default="amazon.nova-sonic-v1:0",
-        help="Nova Sonic model name (default: amazon.nova-sonic-v1:0)",
-    )
-    parser.add_argument(
-        "--max-turns",
-        type=int,
-        default=None,
-        help="Maximum number of turns to run (default: all turns)",
-    )
-    parser.add_argument(
-        "--vad-sensitivity",
-        choices=["HIGH", "MEDIUM", "LOW"],
-        default="HIGH",
-        help="VAD endpointing sensitivity (Nova 2 Sonic only). LOW = longer wait before cutoff. Default: HIGH",
-    )
+                self.paced_input.enqueue_wav_file(audio_path)
+                logger.info(f"Queued audio for turn {self.turn_idx}")
 
-    args = parser.parse_args()
+                # Signal trigger as soon as we start sending audio.
+                # This tells the turn detector to start accepting text.
+                self.turn_detector.signal_trigger_sent()
 
-    logger.info(f"Running Nova Sonic test with model: {args.model}")
-    if args.max_turns:
-        logger.info(f"Limiting to {args.max_turns} turns")
-    if args.vad_sensitivity:
-        logger.info(f"VAD sensitivity: {args.vad_sensitivity}")
-    asyncio.run(main(args.model, max_turns=args.max_turns, vad_sensitivity=args.vad_sensitivity))
+                # Wait for audio to finish streaming
+                wait_time = audio_duration_sec + 0.5
+                logger.info(f"Waiting {wait_time:.2f}s for audio to finish streaming...")
+                await asyncio.sleep(wait_time)
+
+                # Start TTFB timing
+                self.recorder.reset_ttfb()
+                await self.llm.start_ttfb_for_user_audio_complete()
+
+                # Trigger assistant response
+                # Nova Sonic v1 needs explicit audio trigger, Nova 2 Sonic auto-triggers via VAD
+                if self.llm._is_assistant_response_trigger_needed():
+                    await self.llm.trigger_assistant_response()
+                else:
+                    # Nova 2 Sonic - send LLMRunFrame to trigger context push
+                    logger.info("Using LLMRunFrame for Nova 2 Sonic")
+                    await self.task.queue_frames([LLMRunFrame()])
+                logger.info(f"Triggered assistant response for turn {self.turn_idx}")
+            except Exception as e:
+                logger.exception(f"Failed to queue audio for turn {self.turn_idx}: {e}")
+                # Fall back to text
+                await self.task.queue_frames(
+                    [
+                        LLMMessagesAppendFrame(
+                            messages=[{"role": "user", "content": turn["input"]}],
+                            run_llm=False,
+                        )
+                    ]
+                )
+                await asyncio.sleep(0.5)
+                # Trigger assistant response (model-specific)
+                if self.llm._is_assistant_response_trigger_needed():
+                    await self.llm.trigger_assistant_response()
+                else:
+                    await self.task.queue_frames([LLMRunFrame()])
+                self.turn_detector.signal_trigger_sent()
+        else:
+            # No audio file, use text
+            await self.task.queue_frames(
+                [
+                    LLMMessagesAppendFrame(
+                        messages=[{"role": "user", "content": turn["input"]}],
+                        run_llm=False,
+                    )
+                ]
+            )
+            await asyncio.sleep(0.5)
+            # Trigger assistant response (model-specific)
+            if self.llm._is_assistant_response_trigger_needed():
+                await self.llm.trigger_assistant_response()
+            else:
+                await self.task.queue_frames([LLMRunFrame()])
+            self.turn_detector.signal_trigger_sent()

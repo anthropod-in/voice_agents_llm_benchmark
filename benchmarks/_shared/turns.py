@@ -121,10 +121,9 @@ turns = [{'input': "I'm trying to decide whether to come for workshop day. When 
   'required_function_call': None,
   'audio_file': 'turns_audio/turn_013.wav'},
  {'input': 'Will there be vegan options?',
-  'golden_text': 'Of course! I can submit a dietary request to ensure there are vegan options '
-                 'available for you. I have your name as Jennifer Smith. Is that correct?',
+  'golden_text': 'Of course! I can submit a dietary request for you. Would you like me to do that?',
   'required_function_call': None,
-  'audio_file': 'turns_audio/turn_014.wav'},
+  'audio_file': 'turn_014.wav'},
  {'input': 'Yes.',
   'golden_text': "Thank you, Jennifer. I've submitted your request for vegan meals. Is there "
                  'anything else I can help you with today?',
@@ -148,11 +147,11 @@ turns = [{'input': "I'm trying to decide whether to come for workshop day. When 
   'function_call_response': {'status': 'success'},
   'audio_file': 'turns_audio/turn_017.wav'},
  {'input': "What's the weather supposed to be like in San Francisco tomorrow?",
-  'golden_text': "I'm sorry, I don't have weather information. I'm the voice assistant for the AI "
-                 "Engineer World's Fair 2025 and can only help with questions about the event. Is "
-                 'there anything about the conference I can help you with?',
+  'golden_text': "I'm sorry, I don't have weather information. I'm the voice assistant for the "
+                 "AI Engineer World's Fair 2025 and can only help with questions about the event. "
+                 "Is there anything about the conference I can help you with?",
   'required_function_call': None,
-  'audio_file': 'benchmarks/_shared/audio/turn_018.wav'},
+  'audio_file': 'turn_018.wav'},
  {'input': "Well, since I can't access the mobile maps, can you tell me how to get to Salon 2?",
   'golden_text': "I understand you're looking for Salon 2 since the maps in the app aren't working "
                  "for you. Unfortunately, I don't have the ability to provide directions or "
@@ -171,8 +170,7 @@ turns = [{'input': "I'm trying to decide whether to come for workshop day. When 
                  'Then, at 12:45 PM, he\'s giving a talk titled **"How fast are LLM inference '
                  'engines anyway?"**\n'
                  '\n'
-                 'The workshop is part of the Infrastructure track, and the talk is part of the AI '
-                 'in Action track.',
+                 'The workshop is part of the Infrastructure track, and the talk is part of the AI in Action track.',
   'required_function_call': None,
   'audio_file': 'turns_audio/turn_020.wav'},
  {'input': 'Where is the second one?',

@@ -1,0 +1,58 @@
+# Environment
+.env
+.env.*
+
+# Example/reference scripts (not part of the package)
+19-openai-realtime.py
+26b-gemini-live-function-calling.py
+40-aws-nova-sonic.py
+
+# Debug and one-time utility scripts
+debug_thinking*.py
+create_short_system_instruction.py
+task_agent.py
+
+# Legacy files (superseded by benchmarks/ structure)
+llms-short.txt
+system_instruction_short.py
+
+# Working documents
+BENCHMARK_PROGRESS.md
+REFACTOR_PROPOSAL.md
+khk-notes.md
+
+# Output directories
+runs/
+turns_audio_backup/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
