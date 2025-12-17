@@ -10,10 +10,10 @@ The judge uses a two-phase approach:
 1. Initial pass: Compare each turn against golden expectations
 2. Realignment pass: Detect early/late function calls and adjust scoring
 
-Usage via CLI:
-    uv run multi-turn-eval judge runs/aiwf_medium_context/20251215T202910_gemini-...
-    uv run multi-turn-eval judge runs/... --only-turns 0,1,2
-    uv run multi-turn-eval judge runs/... --debug
+Usage:
+    uv run judge_transcript_claude_v3.py runs/aiwf_medium_context/20251215T202910_gemini-...
+    uv run judge_transcript_claude_v3.py runs/... --only-turns 0,1,2
+    uv run judge_transcript_claude_v3.py runs/... --debug
 """
 
 import os
@@ -221,26 +221,12 @@ async def judge_with_claude(
     run_dir: Path,
     only_turns: Optional[set[int]] = None,
     debug: bool = False,
-    expected_turns: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Main judging function using two-phase realignment approach.
-
-    Args:
-        run_dir: Path to the run directory containing transcript.jsonl
-        only_turns: Optional set of turn indices to judge
-        debug: Enable debug logging
-        expected_turns: Optional list of expected turns. If not provided, imports from turns module.
-
-    Returns:
-        Dict with judgments, realignment_notes, function_tracking, summary, and model_name.
-    """
+    """Main judging function using two-phase realignment approach."""
 
     # Load data
     records = load_transcript(run_dir)
-
-    # Get expected turns from parameter or import
-    if expected_turns is None:
-        from turns import turns as expected_turns
+    from turns import turns as expected_turns
 
     # Filter records if only_turns specified
     if only_turns is not None:
@@ -365,24 +351,12 @@ def write_outputs(
     run_dir: Path,
     records: List[Dict[str, Any]],
     judgments: Dict[int, Dict[str, Any]],
+    realignment_notes: str,
+    function_tracking: Dict[str, Any],
     summary: str,
     model_name: str,
-    realignment_notes: str = "",
-    function_tracking: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Write all output files.
-
-    Args:
-        run_dir: Path to the run directory
-        records: List of transcript records
-        judgments: Dict mapping turn number to judgment data
-        summary: Summary string (for backward compat, not used in output)
-        model_name: Name of the model being judged
-        realignment_notes: Optional notes about turn realignment (v3 feature)
-        function_tracking: Optional dict tracking function call timing (v3 feature)
-    """
-    if function_tracking is None:
-        function_tracking = {}
+    """Write all output files."""
 
     # 1. claude_judged.jsonl
     with (run_dir / "claude_judged.jsonl").open("w", encoding="utf-8") as f:
@@ -503,7 +477,7 @@ def write_outputs(
 
 
 # ============================================================================
-# Main CLI (for standalone use)
+# Main CLI
 # ============================================================================
 
 def main():
@@ -572,10 +546,10 @@ def main():
         run_dir,
         records,
         result["judgments"],
-        result["summary"],
-        result["model_name"],
         result.get("realignment_notes", ""),
         result.get("function_tracking", {}),
+        result["summary"],
+        result["model_name"],
     )
 
     # Print summary

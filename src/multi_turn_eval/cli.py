@@ -312,6 +312,8 @@ def judge(
         result["judgments"],
         result["summary"],
         result["model_name"],
+        result.get("realignment_notes", ""),
+        result.get("function_tracking", {}),
     )
 
     # Print summary
