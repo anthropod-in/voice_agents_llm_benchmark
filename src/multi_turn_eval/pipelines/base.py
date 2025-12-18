@@ -53,6 +53,7 @@ class BasePipeline(ABC):
         self.context: Optional[LLMContext] = None
         self.llm: Optional[FrameProcessor] = None
         self.model_name: Optional[str] = None
+        self.service_name: Optional[str] = None
         self._turn_indices: Optional[List[int]] = None
         # Track tool calls to detect duplicates within a turn
         self._seen_tool_calls: set = set()
@@ -71,6 +72,7 @@ class BasePipeline(ABC):
         recorder: TranscriptRecorder,
         model: str,
         service_class: Optional[type] = None,
+        service_name: Optional[str] = None,
         turn_indices: Optional[List[int]] = None,
     ) -> None:
         """Run the complete benchmark. Pipeline handles everything internally.
@@ -79,10 +81,12 @@ class BasePipeline(ABC):
             recorder: TranscriptRecorder for saving results.
             model: Model name/identifier.
             service_class: LLM service class (required unless pipeline sets requires_service=False).
+            service_name: Service name/alias (e.g., "openai", "openrouter").
             turn_indices: Optional list of turn indices to run (for debugging).
         """
         self.recorder = recorder
         self.model_name = model
+        self.service_name = service_name  # Store for use in _create_llm overrides
         self._turn_indices = turn_indices
 
         # Create LLM service
@@ -122,6 +126,9 @@ class BasePipeline(ABC):
 
         Returns:
             Configured LLM service instance.
+
+        Note:
+            Subclasses can access self.service_name if needed for service-specific config.
         """
         if service_class is None:
             raise ValueError("--service is required for this pipeline")
@@ -130,6 +137,17 @@ class BasePipeline(ABC):
         kwargs: Dict[str, Any] = {"model": model}
         class_name = service_class.__name__
         model_lower = model.lower()
+        service_name_lower = (self.service_name or "").lower()
+
+        # Handle OpenRouter (uses OpenAI-compatible API with different base URL and API key)
+        if service_name_lower == "openrouter":
+            api_key = os.getenv("OPENROUTER_API_KEY")
+            if not api_key:
+                raise EnvironmentError("OPENROUTER_API_KEY environment variable is required")
+            kwargs["api_key"] = api_key
+            kwargs["base_url"] = "https://openrouter.ai/api/v1"
+            logger.info(f"Using OpenRouter with base_url={kwargs['base_url']}")
+            return service_class(**kwargs)
 
         if "Anthropic" in class_name:
             api_key = os.getenv("ANTHROPIC_API_KEY")

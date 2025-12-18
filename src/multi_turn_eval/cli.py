@@ -31,6 +31,7 @@ load_dotenv()
 SERVICE_ALIASES = {
     "openai": "pipecat.services.openai.llm.OpenAILLMService",
     "openai-realtime": "pipecat.services.openai.realtime.llm.OpenAIRealtimeLLMService",
+    "openrouter": "pipecat.services.openai.llm.OpenAILLMService",  # OpenRouter uses OpenAI-compatible API
     "anthropic": "pipecat.services.anthropic.llm.AnthropicLLMService",
     "google": "pipecat.services.google.llm.GoogleLLMService",
     "gemini-live": "multi_turn_eval.pipelines.realtime.GeminiLiveLLMServiceWithReconnection",
@@ -47,6 +48,7 @@ SERVICE_ALIASES = {
 PIPELINE_CLASSES = {
     "text": "multi_turn_eval.pipelines.text.TextPipeline",
     "realtime": "multi_turn_eval.pipelines.realtime.RealtimePipeline",
+    "grok-realtime": "multi_turn_eval.pipelines.grok_realtime.GrokRealtimePipeline",
     "nova-sonic": "multi_turn_eval.pipelines.nova_sonic.NovaSonicPipeline",
 }
 
@@ -102,6 +104,9 @@ def get_pipeline_class(pipeline_type: str) -> type:
 def infer_pipeline(model: str) -> str:
     """Infer default pipeline from model name pattern."""
     m = model.lower()
+    # Grok realtime uses dedicated pipeline for xAI-specific protocol handling
+    if m.startswith("grok") and "realtime" in m:
+        return "grok-realtime"
     if "realtime" in m:
         return "realtime"
     if "native-audio" in m or "live" in m:
@@ -235,6 +240,7 @@ async def _run(
             recorder=recorder,
             model=model,
             service_class=service_class,
+            service_name=service,
             turn_indices=turn_indices,
         )
         click.echo(f"Completed benchmark run")

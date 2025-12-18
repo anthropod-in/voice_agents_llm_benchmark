@@ -12,19 +12,20 @@ The two benchmarks here in this public repo are:
 Text mode models:
 
 ```
-| Model                  | Tool Use  | Instruction | KB Ground | Pass Rate | Median Rate | TTFB Med | TTFB P95 | TTFB Max |
-|------------------------|-----------|-------------|-----------|-----------|-------------|----------|----------|----------|
-| gpt-5.1                | 300/300   | 300/300     | 300/300   | 100.0%    | 100.0%      | 916ms    | 2011ms   | 5216ms   |
-| gemini-3-flash-preview | 300/300   | 300/300     | 300/300   | 100.0%    | 100.0%      | 1193ms   | 1635ms   | 6653ms   |
-| claude-sonnet-4-5      | 300/300   | 300/300     | 300/300   | 100.0%    | 100.0%      | 2234ms   | 3062ms   | 5438ms   |
-| gpt-4.1                | 283/300   | 273/300     | 298/300   | 94.9%     | 97.8%       | 683ms    | 1052ms   | 3860ms   |
-| gemini-2.5-flash       | 275/300   | 268/300     | 300/300   | 93.7%     | 94.4%       | 594ms    | 1349ms   | 2104ms   |
-| gpt-5-mini             | 271/300   | 272/300     | 289/300   | 92.4%     | 95.6%       | 6339ms   | 17845ms  | 27028ms  |
-| gpt-4o-mini            | 271/300   | 262/300     | 293/300   | 91.8%     | 92.2%       | 760ms    | 1322ms   | 3256ms   |
-| gpt-4o                 | 278/300   | 249/300     | 294/300   | 91.2%     | 95.6%       | 625ms    | 1222ms   | 13378ms  |
-| gpt-oss-120b (groq)    | 272/300   | 270/300     | 298/300   | 89.3%     | 90.0%       |   98ms   |  226ms   | 2117ms   |
-| gpt-5.2                | 224/300   | 228/300     | 250/300   | 78.0%     | 92.2%       | 819ms    | 1483ms   | 1825ms   |
-| claude-haiku-4-5       | 221/300   | 172/300     | 299/300   | 76.9%     | 75.6%       | 732ms    | 1334ms   | 4654ms   |
+| Model                   | Tool Use  | Instruction | KB Ground | Pass Rate | Median Rate | TTFB Med | TTFB P95 | TTFB Max |
+|-------------------------|-----------|-------------|-----------|-----------|-------------|----------|----------|----------|
+| gpt-5.1                 | 300/300   | 300/300     | 300/300   | 100.0%    | 100.0%      |  916ms   | 2011ms   | 5216ms   |
+| gemini-3-flash-preview  | 300/300   | 300/300     | 300/300   | 100.0%    | 100.0%      | 1193ms   | 1635ms   | 6653ms   |
+| claude-sonnet-4-5       | 300/300   | 300/300     | 300/300   | 100.0%    | 100.0%      | 2234ms   | 3062ms   | 5438ms   |
+| gpt-4.1                 | 283/300   | 273/300     | 298/300   | 94.9%     | 97.8%       | 683ms    | 1052ms   | 3860ms   |
+| gemini-2.5-flash        | 275/300   | 268/300     | 300/300   | 93.7%     | 94.4%       |  594ms   | 1349ms   | 2104ms   |
+| gpt-5-mini              | 271/300   | 272/300     | 289/300   | 92.4%     | 95.6%       | 6339ms   | 17845ms  | 27028ms  |
+| gpt-4o-mini             | 271/300   | 262/300     | 293/300   | 91.8%     | 92.2%       |  760ms   | 1322ms   | 3256ms   |
+| nemotron-3-nano-30b-a3b | 287/304   | 286/304     | 298/304   | 91.4%     | 93.3%       |   -      |   -      |   -      |
+| gpt-4o                  | 278/300   | 249/300     | 294/300   | 91.2%     | 95.6%       |  625ms   | 1222ms   | 13378ms  |
+| gpt-oss-120b (groq)     | 272/300   | 270/300     | 298/300   | 89.3%     | 90.0%       |   98ms   |  226ms   | 2117ms   |
+| gpt-5.2                 | 224/300   | 228/300     | 250/300   | 78.0%     | 92.2%       |  819ms   | 1483ms   | 1825ms   |
+| claude-haiku-4-5        | 221/300   | 172/300     | 299/300   | 76.9%     | 75.6%       |  732ms   | 1334ms   | 4654ms   |
 ```
 
 Speech-to-speech models:
@@ -33,6 +34,7 @@ Speech-to-speech models:
 |   Model                         | Tool Use  | Instruction | KB Ground | Pass Rate | Median Rate | TTFB Med |
 |---------------------------------|-----------|-------------|-----------|-----------|-------------|----------|
 |   gpt-realtime                  | 267/300   | 265/300     | 300/300   | 92.4%     | 92.8%       | 818ms    |
+|   grok-realtime                 | 264/300   | 257/300     | 296/300   | 90.8%     | 92.8%       | 685ms    |
 |   gemini-native-audio-12-2025   | 253/300   | 259/300     | 286/300   | 88.7%     | 90.0%       | N/A      |
 |   gemini-native-audio-09-2025   | 236/300   | 227/300     | 268/300   | 81.2%     | 89.4%       | 785ms    |
 | * amazon.nova-2-sonic-v1:0      | 278/300   | 265/300     | 296/300   | 93.2%     | 95.6%       | *        |
@@ -117,12 +119,15 @@ uv run multi-turn-eval run aiwf_medium_context --model claude-sonnet-4-5 --servi
 uv run multi-turn-eval run aiwf_medium_context --model gpt-4o --service openai
 uv run multi-turn-eval run aiwf_medium_context --model gemini-2.5-flash --service google
 
-# Realtime audio models (pipeline auto-detected from model name)
+# Realtime audio models 
 uv run multi-turn-eval run aiwf_medium_context --model gpt-realtime --service openai-realtime
 uv run multi-turn-eval run aiwf_medium_context --model gemini-2.5-flash-native-audio-preview-12-2025 --service gemini-live
 
 # Nova Sonic (no --service needed, pipeline creates its own LLM)
 uv run multi-turn-eval run aiwf_medium_context --model amazon.nova-2-sonic-v1:0 --pipeline nova-sonic
+
+# Grok (xAI) Realtime
+uv run multi-turn-eval run aiwf_medium_context --model grok-realtime
 
 # Debug with limited turns
 uv run multi-turn-eval run aiwf_medium_context --model gpt-4o --service openai --only-turns 0,1,2

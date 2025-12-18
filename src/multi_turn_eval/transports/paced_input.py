@@ -56,6 +56,7 @@ class PacedInputTransport(BaseInputTransport):
         pre_roll_ms: int = 0,
         continuous_silence: bool = False,
         wait_for_ready: bool = False,
+        emit_user_stopped_speaking: bool = False,
     ):
         super().__init__(params)
         self._chunk_ms = chunk_ms
@@ -68,6 +69,7 @@ class PacedInputTransport(BaseInputTransport):
         self._did_preroll = False
         self._continuous_silence = continuous_silence  # Send silence when no audio queued
         self._wait_for_ready = wait_for_ready  # If True, wait for signal_ready() before sending audio
+        self._emit_user_stopped_speaking = emit_user_stopped_speaking  # Emit UserStoppedSpeakingFrame after each file
         self._llm_ready = threading.Event()  # Signaled when downstream LLM is ready to receive audio
         if not wait_for_ready:
             self._llm_ready.set()  # If not waiting, consider LLM ready immediately
@@ -295,7 +297,17 @@ class PacedInputTransport(BaseInputTransport):
                     f"resuming silence"
                 )
 
-            # NOTE: We no longer send UserStoppedSpeakingFrame here.
+                # Optionally emit UserStoppedSpeakingFrame for services with VAD disabled
+                # This triggers manual audio buffer commit and response creation
+                if self._emit_user_stopped_speaking:
+                    logger.info(f"{self}: Emitting UserStoppedSpeakingFrame")
+                    loop = self.get_event_loop()
+                    loop.call_soon_threadsafe(
+                        lambda: self.create_task(self.push_frame(UserStoppedSpeakingFrame()))
+                    )
+
+            # NOTE: By default we do not send UserStoppedSpeakingFrame here.
             # For realtime/live models with server-side VAD, we rely on the server
             # to detect end of speech. We send continuous audio (including silence)
             # so the connection never appears idle.
+            # Set emit_user_stopped_speaking=True for services with VAD disabled.

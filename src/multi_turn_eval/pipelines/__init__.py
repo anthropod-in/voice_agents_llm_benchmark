@@ -9,6 +9,7 @@ Pipelines handle the full execution of multi-turn benchmarks including:
 Available pipelines:
 - TextPipeline: For text-based LLM services (OpenAI, Anthropic, Google, etc.)
 - RealtimePipeline: For speech-to-speech services (OpenAI Realtime, Gemini Live)
+- GrokRealtimePipeline: For xAI Grok Voice Agent API
 - NovaSonicPipeline: For AWS Nova Sonic speech-to-speech service
 """
 
@@ -17,6 +18,10 @@ from multi_turn_eval.pipelines.text import TextPipeline
 from multi_turn_eval.pipelines.realtime import (
     RealtimePipeline,
     GeminiLiveLLMServiceWithReconnection,
+)
+from multi_turn_eval.pipelines.grok_realtime import (
+    GrokRealtimePipeline,
+    XAIRealtimeLLMService,
 )
 from multi_turn_eval.pipelines.nova_sonic import (
     NovaSonicPipeline,
@@ -29,6 +34,8 @@ __all__ = [
     "TextPipeline",
     "RealtimePipeline",
     "GeminiLiveLLMServiceWithReconnection",
+    "GrokRealtimePipeline",
+    "XAIRealtimeLLMService",
     "NovaSonicPipeline",
     "NovaSonicLLMServiceWithCompletionSignal",
     "NovaSonicTurnGate",
