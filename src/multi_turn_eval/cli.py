@@ -35,6 +35,8 @@ SERVICE_ALIASES = {
     "google": "pipecat.services.google.llm.GoogleLLMService",
     "gemini-live": "multi_turn_eval.pipelines.realtime.GeminiLiveLLMServiceWithReconnection",
     "bedrock": "pipecat.services.aws.llm.AWSBedrockLLMService",
+    "groq": "pipecat.services.groq.llm.GroqLLMService",
+    "cerebras": "pipecat.services.cerebras.llm.CerebrasLLMService",
 }
 
 

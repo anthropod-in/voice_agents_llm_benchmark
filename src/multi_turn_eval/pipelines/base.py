@@ -136,6 +136,16 @@ class BasePipeline(ABC):
             if not api_key:
                 raise EnvironmentError("ANTHROPIC_API_KEY environment variable is required")
             kwargs["api_key"] = api_key
+        elif "Groq" in class_name:
+            api_key = os.getenv("GROQ_API_KEY")
+            if not api_key:
+                raise EnvironmentError("GROQ_API_KEY environment variable is required")
+            kwargs["api_key"] = api_key
+        elif "Cerebras" in class_name:
+            api_key = os.getenv("CEREBRAS_API_KEY")
+            if not api_key:
+                raise EnvironmentError("CEREBRAS_API_KEY environment variable is required")
+            kwargs["api_key"] = api_key
         elif "OpenAI" in class_name:
             api_key = os.getenv("OPENAI_API_KEY")
             if not api_key:

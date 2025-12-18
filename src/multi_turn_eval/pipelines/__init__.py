@@ -21,7 +21,7 @@ from multi_turn_eval.pipelines.realtime import (
 from multi_turn_eval.pipelines.nova_sonic import (
     NovaSonicPipeline,
     NovaSonicLLMServiceWithCompletionSignal,
-    NovaSonicTurnEndDetector,
+    NovaSonicTurnGate,
 )
 
 __all__ = [
@@ -31,5 +31,5 @@ __all__ = [
     "GeminiLiveLLMServiceWithReconnection",
     "NovaSonicPipeline",
     "NovaSonicLLMServiceWithCompletionSignal",
-    "NovaSonicTurnEndDetector",
+    "NovaSonicTurnGate",
 ]

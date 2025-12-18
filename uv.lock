@@ -493,18 +493,18 @@ wheels = [
 
 [[package]]
 name = "claude-agent-sdk"
-version = "0.1.17"
+version = "0.1.18"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "mcp" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5c/e4/565dd62b0795427b4f6a0a8221948eef09545aaa44256af4b36a32e866b1/claude_agent_sdk-0.1.17.tar.gz", hash = "sha256:85d0818b7259b65ea0ee3103ae736f2b359243de81540ab1eee771d8cae0d8ac", size = 56157, upload-time = "2025-12-16T00:27:58.008Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/fd/3d/a8c6ad873e8448696d44441c9eb2c24dded620fb32415d68f576a542ccde/claude_agent_sdk-0.1.18.tar.gz", hash = "sha256:4fcb8730cc77dea562fbe9aa48c65eced3ef58a6bb1f34f77e50e8258902477d", size = 56162, upload-time = "2025-12-18T00:42:57.926Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ff/d8/c673cf7533d3489cf516dac078d0fda353d89fb5446973dc9252281ebaff/claude_agent_sdk-0.1.17-py3-none-macosx_11_0_arm64.whl", hash = "sha256:46fd904ce90a183414f979d359519cff347f52c1906d50f1e247551c786a3613", size = 51713924, upload-time = "2025-12-16T00:27:43.409Z" },
-    { url = "https://files.pythonhosted.org/packages/8f/cb/c556f499b0195b98ede53a6c4eb78957725a508335f6c20da25018fb0a4a/claude_agent_sdk-0.1.17-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:08c41656da3ec7930cb966b35df23da6f68fa0fc0a32c61e73d6450c40c0e17e", size = 65993911, upload-time = "2025-12-16T00:27:48.765Z" },
-    { url = "https://files.pythonhosted.org/packages/5b/1f/84dce02915972f0bf0f482a948add4e1a7642c5730ad1106529445a00f1c/claude_agent_sdk-0.1.17-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:be5fe696e50829348b031106dc926bb459c94804a13584a52a483a35ebd1c388", size = 67691009, upload-time = "2025-12-16T00:27:52.1Z" },
-    { url = "https://files.pythonhosted.org/packages/65/d5/ea6fbf27da6bdafa8a1c6d7a778a0f8ced146260a5fc2c74ce606aa28993/claude_agent_sdk-0.1.17-py3-none-win_amd64.whl", hash = "sha256:f2f4e05785a42525cf8026f0bba69bce359b83a57856f0b7349cd311a0d644be", size = 69883013, upload-time = "2025-12-16T00:27:55.514Z" },
+    { url = "https://files.pythonhosted.org/packages/06/14/f529f7c4bab7c71dcbcc8c66f12f491e644ee8a027ac5111d13705df207e/claude_agent_sdk-0.1.18-py3-none-macosx_11_0_arm64.whl", hash = "sha256:9e45b4e3c20c072c3e3325fa60bab9a4b5a7cbbce64ca274b8d7d0af42dd9dd8", size = 54560828, upload-time = "2025-12-18T00:42:44.71Z" },
+    { url = "https://files.pythonhosted.org/packages/2c/68/6e83005aa7bb9056bfad0aef0605249f877dc0c78724c9c0fadebff600fb/claude_agent_sdk-0.1.18-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:3c41bd8f38848609ae0d5da8d7327a4c2d7057a363feafb6fd70df611ea204cc", size = 68743107, upload-time = "2025-12-18T00:42:48.255Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/85/7d6dd85f402135a610894734c442f1166ffed61d03eced39d6bfd14efccd/claude_agent_sdk-0.1.18-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:983f15e51253f40c55136a86d7cc63e023a3576428b05fa1459093d461b2d215", size = 70444964, upload-time = "2025-12-18T00:42:51.752Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/fa/d2b22b7a713c4c049cbd5f9f635836ea5429ff65c1f3bcf4658a8e1c1cf5/claude_agent_sdk-0.1.18-py3-none-win_amd64.whl", hash = "sha256:36f5b84d5c3c8773ee9b56aeb5ab345d1033231db37f80d1f20ac15239bef41c", size = 72637215, upload-time = "2025-12-18T00:42:55.269Z" },
 ]
 
 [[package]]
@@ -743,7 +743,7 @@ requests = [
 
 [[package]]
 name = "google-cloud-speech"
-version = "2.34.0"
+version = "2.35.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "google-api-core", extra = ["grpc"] },
@@ -752,9 +752,9 @@ dependencies = [
     { name = "proto-plus" },
     { name = "protobuf" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b7/c2/500c58a7e3008cb77da01a2f2a8284ac55c808545d18551c62a031ff548d/google_cloud_speech-2.34.0.tar.gz", hash = "sha256:2a7bffd84f134b9b70c9f11cbb5088c534f92be149d71d9073d0b9dd3a431acf", size = 391496, upload-time = "2025-10-20T14:57:17.127Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e6/d2/cc6c0339524b956e74dbc400b5426da6a462704bbb4b5309395761b6986f/google_cloud_speech-2.35.0.tar.gz", hash = "sha256:a9f68b02d71f159105f09aec875b6aa1bddfbc4e584d8885a436647d8a4027b9", size = 401760, upload-time = "2025-12-18T00:02:23.174Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/78/4c/8c52951a4078f4b181917c37a2610e69c0b24a10567d0182bf089a933c35/google_cloud_speech-2.34.0-py3-none-any.whl", hash = "sha256:cc0c6c0fda9306fee01c998bc207b68f71e0a3247121a5a3a27daabacd3a8c98", size = 336614, upload-time = "2025-10-20T14:54:05.004Z" },
+    { url = "https://files.pythonhosted.org/packages/7c/fe/339fea96668f81d5c4cee049b6b008a37fd57bd75dc993dcf69baf711d98/google_cloud_speech-2.35.0-py3-none-any.whl", hash = "sha256:52ea1a3b486a93b517f77c562e2e516b5b9e04d45cc5596d13be679986abb269", size = 342163, upload-time = "2025-12-18T00:02:21.552Z" },
 ]
 
 [[package]]
@@ -804,6 +804,23 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e5/7b/adfd75544c415c487b33061fe7ae526165241c1ea133f9a9125a56b39fd8/googleapis_common_protos-1.72.0.tar.gz", hash = "sha256:e55a601c1b32b52d7a3e65f43563e2aa61bcd737998ee672ac9b951cd49319f5", size = 147433, upload-time = "2025-11-06T18:29:24.087Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c4/ab/09169d5a4612a5f92490806649ac8d41e3ec9129c636754575b3553f4ea4/googleapis_common_protos-1.72.0-py3-none-any.whl", hash = "sha256:4299c5a82d5ae1a9702ada957347726b167f9f8d1fc352477702a1e851ff4038", size = 297515, upload-time = "2025-11-06T18:29:13.14Z" },
+]
+
+[[package]]
+name = "groq"
+version = "0.23.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a6/b1/653567a92d876e3e52cdce6780ac3f6dfec5101b6c81a577e3c5abddeebe/groq-0.23.1.tar.gz", hash = "sha256:952e34895f9bfb78ab479e495d77b32180262e5c42f531ce3a1722d6e5a04dfb", size = 125359, upload-time = "2025-04-24T18:59:32.562Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ae/9a/54948664261f707a24377ee7e280dbca52b7265fce8613c52dae0cbf5cf5/groq-0.23.1-py3-none-any.whl", hash = "sha256:05fa38c3d0ad03c19c6185f98f6a73901c2a463e844fd067b79f7b05c8346946", size = 127351, upload-time = "2025-04-24T18:59:30.809Z" },
 ]
 
 [[package]]
@@ -1167,7 +1184,7 @@ dependencies = [
     { name = "google-genai" },
     { name = "loguru" },
     { name = "numpy" },
-    { name = "pipecat-ai", extra = ["anthropic", "aws", "aws-nova-sonic", "azure", "google", "openai"] },
+    { name = "pipecat-ai", extra = ["anthropic", "aws", "aws-nova-sonic", "azure", "google", "groq", "openai"] },
     { name = "python-dotenv" },
     { name = "sounddevice" },
     { name = "soundfile" },
@@ -1180,7 +1197,7 @@ requires-dist = [
     { name = "google-genai", specifier = ">=1.56.0" },
     { name = "loguru" },
     { name = "numpy", specifier = ">=1.26" },
-    { name = "pipecat-ai", extras = ["anthropic", "aws", "aws-nova-sonic", "azure", "google", "openai"], git = "https://github.com/pipecat-ai/pipecat.git?rev=main" },
+    { name = "pipecat-ai", extras = ["anthropic", "aws", "aws-nova-sonic", "azure", "cerebras", "google", "groq", "openai"], specifier = "==0.0.98" },
     { name = "python-dotenv" },
     { name = "sounddevice", specifier = ">=0.4.6" },
     { name = "soundfile", specifier = ">=0.12.1" },
@@ -1447,8 +1464,8 @@ wheels = [
 
 [[package]]
 name = "pipecat-ai"
-version = "0.0.98.dev151"
-source = { git = "https://github.com/pipecat-ai/pipecat.git?rev=main#65e4719cecc9da0be673e75a807f79b310fe74d7" }
+version = "0.0.98"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
@@ -1466,6 +1483,10 @@ dependencies = [
     { name = "pyloudnorm" },
     { name = "resampy" },
     { name = "soxr" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/03/90/385e824872a2984b026632eb56bfb0743a878550ea81a390934ff599423d/pipecat_ai-0.0.98.tar.gz", hash = "sha256:dea72785874814c6fde945f9fe21c7f89710c7d573e7fc5a22835e566a66acc9", size = 10737874, upload-time = "2025-12-17T19:29:14.662Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/05/05/db4fbe09c585bf6cd75002a1be2bfefcb431ef75ef9eb4da08d21a48de9e/pipecat_ai-0.0.98-py3-none-any.whl", hash = "sha256:8d91ce3550a310451262542a0794ff06fa5fa17ada67fe7e34fc714062440a87", size = 10465474, upload-time = "2025-12-17T19:29:11.987Z" },
 ]
 
 [package.optional-dependencies]
@@ -1487,6 +1508,9 @@ google = [
     { name = "google-cloud-texttospeech" },
     { name = "google-genai" },
     { name = "websockets" },
+]
+groq = [
+    { name = "groq" },
 ]
 openai = [
     { name = "websockets" },

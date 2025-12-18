@@ -3,25 +3,30 @@
 import asyncio
 import json
 import time
+import wave
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+import numpy as np
 from loguru import logger
 
 from pipecat.frames.frames import (
+    BotStoppedSpeakingFrame,
     DataFrame,
     Frame,
     InputAudioRawFrame,
     LLMFullResponseStartFrame,
-    LLMFullResponseEndFrame,
     LLMRunFrame,
     MetricsFrame,
     TTSAudioRawFrame,
-    TTSStoppedFrame,
     TTSTextFrame,
 )
+from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.aws.nova_sonic.llm import AWSNovaSonicLLMService
+from pipecat.transports.base_transport import TransportParams
+
+from multi_turn_eval.transports.null_audio_output import NullAudioOutputTransport
 
 
 @dataclass
@@ -502,53 +507,133 @@ Be conversational and concise. If you don't have specific information, say so po
         await self.push_frame(NovaSonicCompletionEndFrame())
 
 
-class NovaSonicTurnEndDetector(FrameProcessor):
-    """Detects end of Nova Sonic turn based on text arrival (not audio silence).
+# ============================================================================
+# Nova Sonic Turn Gate (Simplified Turn Detection)
+# ============================================================================
 
-    Nova Sonic has unique behavior where assistant text arrives significantly
-    AFTER audio output finishes (8+ seconds delay). This detector:
 
-    1. Watches for TTSTextFrame with non-empty content
-    2. Buffers all text for the current response
-    3. After no more text arrives for `text_timeout_sec`, triggers end-of-turn
+class NovaSonicTurnGate(FrameProcessor):
+    """Simplified turn gate for Nova Sonic using BotStoppedSpeakingFrame.
 
-    This approach works because:
-    - Without BotStoppedSpeakingFrame, Nova Sonic's `_assistant_is_responding` stays True
-    - This allows text to be pushed when it arrives from the server
-    - We detect response end by watching for text, not audio silence
+    This processor replaces the complex NovaSonicTurnEndDetector with a simpler
+    approach that mirrors the realtime pipeline:
+
+    1. Accumulates SPECULATIVE text from TTSTextFrame as it arrives
+    2. Waits for BotStoppedSpeakingFrame (from NullAudioOutputTransport)
+    3. Adds a small delay to ensure all audio has been processed
+    4. Triggers the turn-end callback with accumulated text
+
+    This works because:
+    - NullAudioOutputTransport paces audio at real-time speed
+    - BotStoppedSpeakingFrame fires after 2s of empty audio queue
+    - SPECULATIVE text arrives with audio, so it's complete by the time
+      BotStoppedSpeakingFrame fires
     """
 
     def __init__(
         self,
-        end_of_turn_callback: Callable[[str], Any],
-        text_timeout_sec: float = 5.0,
-        post_completion_timeout_sec: float = 3.0,  # Shorter timeout after completionEnd
-        response_timeout_sec: float = 30.0,  # Max time to wait for any response
+        on_turn_ready: Callable[[str], Any],
+        audio_drain_delay: float = 0.5,
+        response_timeout_sec: float = 60.0,
         metrics_callback: Optional[Callable[[MetricsFrame], None]] = None,
+        **kwargs,
     ):
-        super().__init__()
-        self._end_of_turn_callback = end_of_turn_callback
-        self._metrics_callback = metrics_callback
-        self._text_timeout = text_timeout_sec
-        self._post_completion_timeout = post_completion_timeout_sec
+        """Initialize the turn gate.
+
+        Args:
+            on_turn_ready: Async callback to invoke when turn is ready to advance.
+                          Called with the assistant's response text.
+            audio_drain_delay: Seconds to wait after BotStoppedSpeakingFrame before
+                              triggering turn end. Default 0.5s.
+            response_timeout_sec: Maximum time to wait for any response (fallback).
+            metrics_callback: Optional callback for metrics frames.
+        """
+        super().__init__(**kwargs)
+        self._on_turn_ready = on_turn_ready
+        self._audio_drain_delay = audio_drain_delay
         self._response_timeout = response_timeout_sec
+        self._metrics_callback = metrics_callback
 
         # State tracking
-        self._response_active = False
         self._response_text = ""
-        self._last_text_time: Optional[float] = None
-        self._last_audio_time: Optional[float] = None  # Track when last audio arrived
-        self._timeout_task: Optional[asyncio.Task] = None
-        self._response_timeout_task: Optional[asyncio.Task] = None
-        self._audio_check_task: Optional[asyncio.Task] = None  # Check for audio completion
-        self._audio_frame_count = 0
+        self._response_active = False
         self._waiting_for_response = False
-        self._trigger_time: Optional[float] = None
-        self._processing_turn_end = False  # Guard against concurrent turn completions
-        self._completion_ended = False  # True when completionEnd OR audio stops
-        self._text_turn_ended = False  # True when NovaSonicTextTurnEndFrame received
+        self._turn_end_task: Optional[asyncio.Task] = None
+        self._response_timeout_task: Optional[asyncio.Task] = None
+        self._processing_turn_end = False
+        self._audio_frame_count = 0
+
+    def signal_trigger_sent(self):
+        """Called when assistant response is triggered - start response timeout."""
+        self._waiting_for_response = True
+        self._response_text = ""
+        self._audio_frame_count = 0
+        logger.info(
+            f"[NovaSonicTurnGate] Trigger sent, waiting for response (timeout={self._response_timeout}s)"
+        )
+        if self._response_timeout_task:
+            self._response_timeout_task.cancel()
+        self._response_timeout_task = asyncio.create_task(self._check_response_timeout())
+
+    def clear_pending(self):
+        """Clear any pending state (e.g., on reconnection)."""
+        self._response_text = ""
+        self._response_active = False
+        self._waiting_for_response = False
+        self._processing_turn_end = False
+        self._audio_frame_count = 0
+        if self._turn_end_task and not self._turn_end_task.done():
+            self._turn_end_task.cancel()
+            self._turn_end_task = None
+        if self._response_timeout_task and not self._response_timeout_task.done():
+            self._response_timeout_task.cancel()
+            self._response_timeout_task = None
+
+    def reset_for_reconnection(self):
+        """Reset state after reconnection."""
+        logger.info("[NovaSonicTurnGate] Resetting state for reconnection")
+        self.clear_pending()
+
+    async def _delayed_turn_end(self, text: str):
+        """Wait for audio to drain, then trigger turn end."""
+        try:
+            logger.info(f"[NovaSonicTurnGate] Waiting {self._audio_drain_delay}s for audio to drain...")
+            await asyncio.sleep(self._audio_drain_delay)
+            logger.info(f"[NovaSonicTurnGate] Triggering turn end with transcript ({len(text)} chars)")
+            self._processing_turn_end = False
+            self._response_active = False
+            self._waiting_for_response = False
+            await self._on_turn_ready(text)
+        except asyncio.CancelledError:
+            logger.info("[NovaSonicTurnGate] Turn end cancelled")
+
+    async def _check_response_timeout(self):
+        """Check if response started within timeout period."""
+        try:
+            await asyncio.sleep(self._response_timeout)
+
+            # Guard against concurrent turn completions
+            if self._processing_turn_end:
+                logger.debug("[NovaSonicTurnGate] Response timeout but already processing, ignoring")
+                return
+
+            # If we get here, no response or no BotStoppedSpeakingFrame within timeout
+            if self._waiting_for_response or self._response_active:
+                self._processing_turn_end = True
+                text = self._response_text or "[NO RESPONSE - TIMEOUT]"
+                logger.warning(
+                    f"[NovaSonicTurnGate] Timeout after {self._response_timeout}s - "
+                    f"ending turn with {len(self._response_text)} chars"
+                )
+                self._response_active = False
+                self._waiting_for_response = False
+                await self._on_turn_ready(text)
+                self._processing_turn_end = False
+        except asyncio.CancelledError:
+            pass  # Response completed normally
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        """Process frames, accumulate text, and watch for BotStoppedSpeakingFrame."""
         await super().process_frame(frame, direction)
 
         # Track metrics
@@ -558,299 +643,50 @@ class NovaSonicTurnEndDetector(FrameProcessor):
         # Track response lifecycle
         if isinstance(frame, LLMFullResponseStartFrame):
             self._response_active = True
-            self._waiting_for_response = False  # Response received!
+            self._waiting_for_response = False
             self._response_text = ""
             self._audio_frame_count = 0
             # Cancel response timeout since we got a response
-            if self._response_timeout_task:
+            if self._response_timeout_task and not self._response_timeout_task.done():
                 self._response_timeout_task.cancel()
                 self._response_timeout_task = None
-            logger.debug("NovaSonicTurnEndDetector: Response started")
+            logger.debug("[NovaSonicTurnGate] Response started")
 
+        # Accumulate SPECULATIVE text from TTSTextFrame
+        elif isinstance(frame, TTSTextFrame):
+            text = getattr(frame, "text", None)
+            if text and (self._waiting_for_response or self._response_active) and not self._processing_turn_end:
+                logger.info(f"[NovaSonicTurnGate] Accumulating text ({len(text)} chars): {text[:60]}...")
+                self._response_text += text
+
+        # Track audio frames for logging
         elif isinstance(frame, TTSAudioRawFrame):
             self._audio_frame_count += 1
-            self._last_audio_time = time.monotonic()
-            # NOTE: We intentionally do NOT call _start_audio_check() here.
-            # Nova Sonic generates responses in multiple audio segments with
-            # 2+ second pauses between them. The audio silence detection would
-            # misinterpret these inter-segment gaps as "response complete" and
-            # trigger premature turn completion before AUDIO END_TURN arrives.
-            # Instead, we rely solely on NovaSonicTextTurnEndFrame (AUDIO END_TURN)
-            # as the authoritative turn completion signal.
 
-        elif isinstance(frame, TTSStoppedFrame):
-            # TTSStoppedFrame indicates the response audio is done
-            # For Nova Sonic without output transport, this is our turn end signal
-            logger.info("NovaSonicTurnEndDetector: TTSStoppedFrame - triggering turn end")
-            # Give a moment for any text to arrive, then trigger
-            asyncio.create_task(self._delayed_turn_end())
-        elif isinstance(frame, LLMFullResponseEndFrame):
-            logger.debug("NovaSonicTurnEndDetector: Received LLMFullResponseEndFrame")
-
-        # Handle Nova Sonic completion end signal
-        elif isinstance(frame, NovaSonicCompletionEndFrame):
+        # Watch for BotStoppedSpeakingFrame - this is the turn end signal
+        elif isinstance(frame, BotStoppedSpeakingFrame):
             logger.info(
-                f"NovaSonicTurnEndDetector: CompletionEnd received! "
-                f"Text so far: {len(self._response_text)} chars. "
-                f"Switching to {self._post_completion_timeout}s post-completion timeout."
+                f"[NovaSonicTurnGate] BotStoppedSpeakingFrame received "
+                f"(text={len(self._response_text)} chars, audio_frames={self._audio_frame_count})"
             )
-            self._completion_ended = True
-            # Restart timeout with shorter post-completion timeout
-            if self._response_text:
-                self._start_timeout_check()
 
-        # Watch for text frames FIRST - process text before checking turn end signals
-        # This ensures we capture text that arrives in the same batch as the turn end signal
-        if isinstance(frame, TTSTextFrame):
-            text = getattr(frame, "text", None)
-            if text:
-                # Accept text if:
-                # - We're waiting for response OR already receiving one
-                # - OR we received the text turn end signal (collecting late text)
-                # AND not currently in the final turn end processing
-                can_accept = (
-                    (self._waiting_for_response or self._response_active or self._text_turn_ended)
-                    and not self._processing_turn_end
-                )
-                if can_accept:
-                    logger.info(
-                        f"NovaSonicTurnEndDetector: Processing text ({len(text)} chars): {text[:100]}..."
-                    )
-                    self._response_text += text
-                    self._last_text_time = time.monotonic()
-                    self._start_timeout_check()
-                # else: Ignore FINAL text chunks that arrive after turn completion.
-                # Nova Sonic sends text twice: SPECULATIVE (with audio) and FINAL (4-6s later).
-                # We capture SPECULATIVE text during the turn, so FINAL chunks are duplicates.
-
-        # Handle Nova Sonic text turn end signal - transcript is now complete!
-        # This is the most reliable signal that all text for this turn has arrived.
-        # Process AFTER text frames so we capture text in the same batch.
-        if isinstance(frame, NovaSonicTextTurnEndFrame):
-            logger.info(
-                f"NovaSonicTurnEndDetector: *** TEXT TURN END *** received! "
-                f"Text collected: {len(self._response_text)} chars."
-            )
-            self._text_turn_ended = True
-            # Cancel any pending timeout - we're ending the turn now
-            if self._timeout_task:
-                self._timeout_task.cancel()
-                self._timeout_task = None
-            # Use a short delay to let any remaining text frames be processed
-            asyncio.create_task(self._handle_text_turn_end())
+            # Guard against concurrent turn completions
+            if self._processing_turn_end:
+                logger.debug("[NovaSonicTurnGate] Already processing turn end, ignoring")
+            elif self._response_active or self._response_text:
+                self._processing_turn_end = True
+                text = self._response_text or "[audio response - no text captured]"
+                # Cancel any existing turn end task
+                if self._turn_end_task and not self._turn_end_task.done():
+                    self._turn_end_task.cancel()
+                # Cancel response timeout
+                if self._response_timeout_task and not self._response_timeout_task.done():
+                    self._response_timeout_task.cancel()
+                    self._response_timeout_task = None
+                # Schedule delayed turn end
+                self._turn_end_task = asyncio.create_task(self._delayed_turn_end(text))
 
         await self.push_frame(frame, direction)
-
-    async def _delayed_turn_end(self):
-        """Wait briefly then trigger turn end (gives text time to arrive)."""
-        await asyncio.sleep(1.0)  # Wait 1 second for any late text
-
-        # Guard against concurrent turn completions
-        if self._processing_turn_end:
-            logger.debug("NovaSonicTurnEndDetector: Delayed turn end but already processing, ignoring")
-            return
-
-        if self._response_active:
-            self._processing_turn_end = True
-            try:
-                # Get accumulated text (might be empty for Nova Sonic)
-                text = self._response_text or "[audio response]"
-                logger.info(
-                    f"NovaSonicTurnEndDetector: Turn ended. Text: {len(self._response_text)} chars, "
-                    f"Audio frames: {self._audio_frame_count}"
-                )
-                self._reset()  # Reset BEFORE callback
-                await self._end_of_turn_callback(text)
-            finally:
-                self._processing_turn_end = False
-
-    async def _handle_text_turn_end(self):
-        """Handle turn end when NovaSonicTextTurnEndFrame is received.
-
-        Since we now use SPECULATIVE text (which arrives with audio), we only need
-        a short delay after AUDIO END_TURN to collect any remaining text chunks.
-        """
-        # Short delay - SPECULATIVE text arrives with audio, so by the time
-        # AUDIO END_TURN fires, most text should already be captured
-        logger.info("NovaSonicTurnEndDetector: AUDIO END_TURN received, waiting 1s for final text...")
-        await asyncio.sleep(1.0)
-
-        # Guard against concurrent turn completions
-        if self._processing_turn_end:
-            logger.debug("NovaSonicTurnEndDetector: Text turn end but already processing, ignoring")
-            return
-
-        self._processing_turn_end = True
-        try:
-            # Get accumulated text
-            final_text = self._response_text or "[no text captured]"
-            audio_frames = self._audio_frame_count
-            logger.info(
-                f"NovaSonicTurnEndDetector: Turn complete via TEXT_TURN_END signal. "
-                f"Text: {len(final_text)} chars, Audio frames: {audio_frames}"
-            )
-            self._reset()  # Reset BEFORE callback
-            await self._end_of_turn_callback(final_text)
-        finally:
-            self._processing_turn_end = False
-
-    def _start_timeout_check(self):
-        """Start or restart the timeout check for more text."""
-        if self._timeout_task:
-            self._timeout_task.cancel()
-        self._timeout_task = asyncio.create_task(self._check_timeout())
-
-    async def _check_timeout(self):
-        """Wait for timeout and trigger end-of-turn if no more text."""
-        try:
-            # Use shorter timeout after completionEnd signal
-            timeout = self._post_completion_timeout if self._completion_ended else self._text_timeout
-            await asyncio.sleep(timeout)
-
-            # Guard against concurrent turn completions
-            if self._processing_turn_end:
-                logger.debug("NovaSonicTurnEndDetector: Timeout fired but already processing turn end, ignoring")
-                return
-
-            # If we get here, no more text arrived for timeout seconds
-            if self._response_text:
-                self._processing_turn_end = True
-                try:
-                    # Capture text and reset state BEFORE the async callback
-                    # This prevents late-arriving text from accumulating during the callback
-                    final_text = self._response_text
-                    audio_frames = self._audio_frame_count
-                    completion_status = "after completionEnd" if self._completion_ended else "before completionEnd"
-                    logger.info(
-                        f"NovaSonicTurnEndDetector: Turn complete after {timeout}s silence ({completion_status}). "
-                        f"Text: {len(final_text)} chars, Audio frames: {audio_frames}"
-                    )
-                    self._reset()  # Reset BEFORE callback to prevent accumulation
-                    await self._end_of_turn_callback(final_text)
-                finally:
-                    self._processing_turn_end = False
-        except asyncio.CancelledError:
-            pass  # New text arrived, timer was reset
-
-    def _start_audio_check(self):
-        """Start or restart the audio completion check."""
-        if self._audio_check_task:
-            self._audio_check_task.cancel()
-        self._audio_check_task = asyncio.create_task(self._check_audio_completion())
-
-    async def _check_audio_completion(self):
-        """Check if audio output has stopped, indicating response is complete.
-
-        When audio stops, we switch to the shorter post-completion timeout for text.
-        This is more reliable than waiting for completionEnd which may not arrive.
-        """
-        AUDIO_DONE_THRESHOLD = 2.0  # Consider audio done after 2s of silence
-        try:
-            while True:
-                await asyncio.sleep(AUDIO_DONE_THRESHOLD)
-
-                if self._last_audio_time is None:
-                    continue
-
-                time_since_audio = time.monotonic() - self._last_audio_time
-                if time_since_audio >= AUDIO_DONE_THRESHOLD and not self._completion_ended:
-                    logger.info(
-                        f"NovaSonicTurnEndDetector: Audio stopped ({time_since_audio:.1f}s ago). "
-                        f"Switching to {self._post_completion_timeout}s post-audio timeout for text."
-                    )
-                    self._completion_ended = True  # Reuse this flag for audio completion
-                    # Restart text timeout with shorter duration
-                    if self._response_text:
-                        self._start_timeout_check()
-                    break  # Done checking audio
-        except asyncio.CancelledError:
-            pass
-
-    def _reset(self):
-        """Reset state for next turn."""
-        self._response_active = False
-        self._response_text = ""
-        self._last_text_time = None
-        self._last_audio_time = None
-        self._audio_frame_count = 0
-        self._waiting_for_response = False
-        self._trigger_time = None
-        self._completion_ended = False
-        self._text_turn_ended = False
-        if self._response_timeout_task:
-            self._response_timeout_task.cancel()
-            self._response_timeout_task = None
-        if self._audio_check_task:
-            self._audio_check_task.cancel()
-            self._audio_check_task = None
-
-    def signal_trigger_sent(self):
-        """Called when assistant response is triggered - start response timeout."""
-        self._waiting_for_response = True
-        self._trigger_time = time.monotonic()
-        logger.info(
-            f"NovaSonicTurnEndDetector: Trigger sent, waiting for response (timeout={self._response_timeout}s)"
-        )
-        if self._response_timeout_task:
-            self._response_timeout_task.cancel()
-        self._response_timeout_task = asyncio.create_task(self._check_response_timeout())
-
-    async def _check_response_timeout(self):
-        """Check if response started within timeout period."""
-        try:
-            await asyncio.sleep(self._response_timeout)
-
-            # Guard against concurrent turn completions
-            if self._processing_turn_end:
-                logger.debug("NovaSonicTurnEndDetector: Response timeout but already processing, ignoring")
-                return
-
-            # If we get here, no response started within timeout
-            if self._waiting_for_response and not self._response_active:
-                self._processing_turn_end = True
-                try:
-                    logger.warning(
-                        f"NovaSonicTurnEndDetector: No response received within {self._response_timeout}s - "
-                        f"ending turn with timeout"
-                    )
-                    self._reset()  # Reset BEFORE callback
-                    await self._end_of_turn_callback("[NO RESPONSE - TIMEOUT]")
-                finally:
-                    self._processing_turn_end = False
-        except asyncio.CancelledError:
-            pass  # Response started or turn reset
-
-    def reset_for_reconnection(self):
-        """Reset state after a connection timeout/reconnection.
-
-        Called by the PipelineTask error handler when Nova Sonic times out.
-        Pipecat automatically reconnects and reloads context, but we need to
-        reset our internal state so we're ready for the re-triggered response.
-        """
-        logger.info("NovaSonicTurnEndDetector: Resetting state for reconnection")
-
-        # Cancel any pending timeout tasks
-        if self._timeout_task:
-            self._timeout_task.cancel()
-            self._timeout_task = None
-        if self._response_timeout_task:
-            self._response_timeout_task.cancel()
-            self._response_timeout_task = None
-        if self._audio_check_task:
-            self._audio_check_task.cancel()
-            self._audio_check_task = None
-
-        # Reset state
-        self._response_active = False
-        self._response_text = ""
-        self._last_text_time = None
-        self._last_audio_time = None
-        self._audio_frame_count = 0
-        self._waiting_for_response = False
-        self._trigger_time = None
-        self._processing_turn_end = False
-        self._completion_ended = False
-        self._text_turn_ended = False
 
 
 # ============================================================================
@@ -900,8 +736,10 @@ class NovaSonicPipeline:
 
         # Nova Sonic specific
         self.paced_input = None
-        self.turn_detector = None
+        self.turn_gate = None  # Simplified turn gate using BotStoppedSpeakingFrame
         self.context_aggregator = None
+        self.output_transport = None  # NullAudioOutputTransport for pacing
+        self.audio_buffer = None  # AudioBufferProcessor for recording
 
         # AWS credentials (needed for LLM creation)
         self._aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
@@ -968,14 +806,12 @@ class NovaSonicPipeline:
         """
         import os
         import soundfile as sf
-        from pathlib import Path
 
         from pipecat.pipeline.pipeline import Pipeline
         from pipecat.pipeline.runner import PipelineRunner
         from pipecat.pipeline.task import PipelineParams, PipelineTask
         from pipecat.processors.aggregators.llm_context import LLMContext
         from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
-        from pipecat.transports.base_transport import TransportParams
 
         from multi_turn_eval.processors.tool_call_recorder import ToolCallRecorder
         from multi_turn_eval.transports.paced_input import PacedInputTransport
@@ -1089,11 +925,10 @@ class NovaSonicPipeline:
                 self.done = True
                 await self.task.cancel()
 
-        # Create turn detector
-        self.turn_detector = NovaSonicTurnEndDetector(
-            end_of_turn_callback=end_of_turn,
-            text_timeout_sec=5.0,
-            post_completion_timeout_sec=2.0,
+        # Create simplified turn gate (replaces complex NovaSonicTurnEndDetector)
+        self.turn_gate = NovaSonicTurnGate(
+            on_turn_ready=end_of_turn,
+            audio_drain_delay=0.5,
             response_timeout_sec=60.0,
             metrics_callback=handle_metrics,
         )
@@ -1112,19 +947,95 @@ class NovaSonicPipeline:
             wait_for_ready=True,  # Wait for LLM to be ready before sending audio
         )
 
+        # Set BOT_VAD_STOP_SECS to 2.0s for reliable end-of-response detection
+        # This must be set BEFORE creating NullAudioOutputTransport
+        import pipecat.transports.base_output as base_output_module
+        base_output_module.BOT_VAD_STOP_SECS = 2.0
+        logger.info("[NovaSonic] Set BOT_VAD_STOP_SECS to 2.0s for reliable turn detection")
+
+        # Create null output transport to generate BotStoppedSpeakingFrame
+        # Nova Sonic outputs 24kHz audio
+        self.output_transport = NullAudioOutputTransport(
+            TransportParams(
+                audio_out_enabled=True,
+                audio_out_sample_rate=24000,  # Nova Sonic output is 24kHz
+            )
+        )
+
+        # Create audio buffer processor for recording
+        # Use 24kHz to match Nova Sonic output (user audio will be upsampled from 16kHz)
+        logger.info("[NovaSonic] Creating AudioBufferProcessor with sample_rate=24000, num_channels=2")
+        self.audio_buffer = AudioBufferProcessor(
+            sample_rate=24000,
+            num_channels=2,  # Stereo: user on left channel, bot on right channel
+        )
+
+        # Register event handler to save audio when track data is ready
+        @self.audio_buffer.event_handler("on_track_audio_data")
+        async def on_track_audio_data(
+            processor, user_audio: bytes, bot_audio: bytes, sample_rate: int, num_channels: int
+        ):
+            """Save conversation audio with user and bot on separate channels."""
+            logger.info(
+                f"[NovaSonic AudioRecording] on_track_audio_data triggered: "
+                f"user={len(user_audio)} bytes, bot={len(bot_audio)} bytes, "
+                f"{sample_rate}Hz, {num_channels}ch"
+            )
+
+            # Get run directory from recorder
+            if not self.recorder or not hasattr(self.recorder, "run_dir"):
+                logger.error("[NovaSonic AudioRecording] Cannot save audio: no recorder or run_dir available")
+                return
+
+            # Convert to numpy for processing
+            user_np = np.frombuffer(user_audio, dtype=np.int16)
+            bot_np = np.frombuffer(bot_audio, dtype=np.int16)
+
+            # Pad shorter track to match longer
+            max_len = max(len(user_np), len(bot_np))
+            if len(user_np) < max_len:
+                user_np = np.concatenate([user_np, np.zeros(max_len - len(user_np), dtype=np.int16)])
+            if len(bot_np) < max_len:
+                bot_np = np.concatenate([bot_np, np.zeros(max_len - len(bot_np), dtype=np.int16)])
+
+            # Interleave for stereo: user=left, bot=right
+            stereo = np.zeros(max_len * 2, dtype=np.int16)
+            stereo[0::2] = user_np
+            stereo[1::2] = bot_np
+
+            output_path = self.recorder.run_dir / "conversation.wav"
+            logger.info(f"[NovaSonic AudioRecording] Saving conversation audio to {output_path}")
+
+            try:
+                with wave.open(str(output_path), "wb") as wf:
+                    wf.setnchannels(2)  # Stereo
+                    wf.setsampwidth(2)  # 16-bit audio = 2 bytes per sample
+                    wf.setframerate(sample_rate)
+                    wf.writeframes(stereo.tobytes())
+
+                # Calculate duration for logging
+                duration_secs = max_len / sample_rate
+                file_size_mb = (max_len * 2 * 2) / (1024 * 1024)
+                logger.info(
+                    f"[NovaSonic AudioRecording] Saved conversation audio: {output_path} "
+                    f"({duration_secs:.1f}s, {file_size_mb:.2f}MB)"
+                )
+            except Exception as e:
+                logger.exception(f"[NovaSonic AudioRecording] Failed to save audio: {e}")
+
         # Track interrupted turn state for reconnection handling
         self._interrupted_turn_text = ""
         self._was_responding_at_disconnect = False
 
         # Set up reconnection callbacks
         def on_reconnecting():
-            logger.info("Reconnection starting: pausing audio input and resetting turn detector")
+            logger.info("Reconnection starting: pausing audio input and resetting turn gate")
             self.paced_input.pause()
 
             # Capture accumulated text and response state BEFORE reset
             # We need this to handle interrupted turns after reconnection
-            self._interrupted_turn_text = self.turn_detector._response_text or ""
-            self._was_responding_at_disconnect = self.turn_detector._response_active
+            self._interrupted_turn_text = self.turn_gate._response_text or ""
+            self._was_responding_at_disconnect = self.turn_gate._response_active
 
             if self._was_responding_at_disconnect:
                 logger.warning(
@@ -1132,7 +1043,7 @@ class NovaSonicPipeline:
                     f"Captured {len(self._interrupted_turn_text)} chars before reset."
                 )
 
-            self.turn_detector.reset_for_reconnection()
+            self.turn_gate.reset_for_reconnection()
 
         def on_reconnected():
             logger.info("Reconnection complete: waiting 2s before resuming audio")
@@ -1172,12 +1083,35 @@ class NovaSonicPipeline:
                     # Reset state
                     self._was_responding_at_disconnect = False
                     self._interrupted_turn_text = ""
+                else:
+                    # We weren't mid-response, but we may have queued audio that was lost
+                    # during reconnection (paced_input.pause() clears the queue).
+                    # Re-queue the current turn's audio if we haven't completed it yet.
+                    if self.turn_idx < len(self.turns):
+                        logger.info(
+                            f"Re-queuing turn {self.turn_idx} after reconnection "
+                            f"(was not mid-response)"
+                        )
+                        time.sleep(0.5)  # Small delay to let signal_ready settle
+
+                        # Bridge to async: run _queue_next_turn in a new event loop
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            loop.run_until_complete(self._requeue_current_turn())
+                            logger.info(
+                                f"Successfully re-queued turn {self.turn_idx} after reconnection"
+                            )
+                        except Exception as e:
+                            logger.error(f"Error re-queuing turn after reconnection: {e}")
+                        finally:
+                            loop.close()
 
             threading.Thread(target=delayed_resume, daemon=True).start()
 
         def on_retriggered():
             logger.info("Assistant response re-triggered after reconnection")
-            self.turn_detector.signal_trigger_sent()
+            self.turn_gate.signal_trigger_sent()
 
         async def on_max_reconnects_exceeded():
             logger.error("Max reconnect attempts exceeded - terminating pipeline")
@@ -1198,14 +1132,20 @@ class NovaSonicPipeline:
             return self._duplicate_tool_call_ids
 
         # Build pipeline
+        # Structure mirrors the realtime pipeline:
+        # - turn_gate accumulates text and waits for BotStoppedSpeakingFrame
+        # - output_transport paces audio and generates BotStoppedSpeakingFrame
+        # - audio_buffer records the audio after pacing
         pipeline = Pipeline(
             [
                 self.paced_input,
                 self.context_aggregator.user(),
                 self.llm,
                 ToolCallRecorder(recorder_accessor, duplicate_ids_accessor),
-                self.turn_detector,
+                self.turn_gate,
                 self.context_aggregator.assistant(),
+                self.output_transport,
+                self.audio_buffer,
             ]
         )
 
@@ -1233,11 +1173,12 @@ class NovaSonicPipeline:
     async def _queue_first_turn(self, delay: float = 1.0):
         """Queue the first turn - send user question as AUDIO, then trigger."""
         import soundfile as sf
-        from pathlib import Path
-
-        from pipecat.frames.frames import LLMRunFrame
 
         await asyncio.sleep(delay)
+
+        # Start audio recording
+        logger.info("[NovaSonic] Starting audio recording")
+        await self.audio_buffer.start_recording()
 
         # Queue LLMRunFrame to establish connection
         logger.info("Queuing LLMRunFrame to establish connection...")
@@ -1266,7 +1207,7 @@ class NovaSonicPipeline:
             # This tells the turn detector to start accepting text.
             # We don't send audio until previous turn ended, so we can safely
             # clear buffers and accept any incoming text from this point.
-            self.turn_detector.signal_trigger_sent()
+            self.turn_gate.signal_trigger_sent()
 
             # Wait for audio to finish streaming (plus small buffer)
             wait_time = audio_duration_sec + 0.5
@@ -1317,7 +1258,7 @@ class NovaSonicPipeline:
 
                 # Signal trigger as soon as we start sending audio.
                 # This tells the turn detector to start accepting text.
-                self.turn_detector.signal_trigger_sent()
+                self.turn_gate.signal_trigger_sent()
 
                 # Wait for audio to finish streaming
                 wait_time = audio_duration_sec + 0.5
@@ -1354,7 +1295,7 @@ class NovaSonicPipeline:
                     await self.llm.trigger_assistant_response()
                 else:
                     await self.task.queue_frames([LLMRunFrame()])
-                self.turn_detector.signal_trigger_sent()
+                self.turn_gate.signal_trigger_sent()
         else:
             # No audio file, use text
             await self.task.queue_frames(
@@ -1371,4 +1312,92 @@ class NovaSonicPipeline:
                 await self.llm.trigger_assistant_response()
             else:
                 await self.task.queue_frames([LLMRunFrame()])
-            self.turn_detector.signal_trigger_sent()
+            self.turn_gate.signal_trigger_sent()
+
+    async def _requeue_current_turn(self):
+        """Re-queue audio for the current turn after reconnection.
+
+        This is called when reconnection happens while waiting for a response
+        (but not mid-response). The audio queue was cleared during reconnection,
+        so we need to re-send the audio for the current turn.
+
+        Unlike _queue_next_turn, this skips the 5-second initial wait since
+        we're recovering from a reconnection and want to resume quickly.
+        """
+        import soundfile as sf
+
+        from pipecat.frames.frames import LLMMessagesAppendFrame
+
+        turn = self._get_current_turn()
+        audio_path = self._get_audio_path_for_turn(self.turn_idx)
+
+        if audio_path:
+            try:
+                # Calculate audio duration
+                data, sr = sf.read(audio_path, dtype="int16")
+                audio_duration_sec = len(data) / sr
+                logger.info(
+                    f"[Reconnect] Audio duration for turn {self.turn_idx}: "
+                    f"{audio_duration_sec:.2f}s"
+                )
+
+                self.paced_input.enqueue_wav_file(audio_path)
+                logger.info(f"[Reconnect] Queued audio for turn {self.turn_idx}")
+
+                # Signal trigger as soon as we start sending audio
+                self.turn_gate.signal_trigger_sent()
+
+                # Wait for audio to finish streaming
+                wait_time = audio_duration_sec + 0.5
+                logger.info(
+                    f"[Reconnect] Waiting {wait_time:.2f}s for audio to finish streaming..."
+                )
+                await asyncio.sleep(wait_time)
+
+                # Start TTFB timing
+                self.recorder.reset_ttfb()
+                await self.llm.start_ttfb_for_user_audio_complete()
+
+                # Trigger assistant response
+                if self.llm._is_assistant_response_trigger_needed():
+                    await self.llm.trigger_assistant_response()
+                else:
+                    logger.info("[Reconnect] Using LLMRunFrame for Nova 2 Sonic")
+                    await self.task.queue_frames([LLMRunFrame()])
+                logger.info(f"[Reconnect] Triggered assistant response for turn {self.turn_idx}")
+            except Exception as e:
+                logger.exception(
+                    f"[Reconnect] Failed to queue audio for turn {self.turn_idx}: {e}"
+                )
+                # Fall back to text
+                await self.task.queue_frames(
+                    [
+                        LLMMessagesAppendFrame(
+                            messages=[{"role": "user", "content": turn["input"]}],
+                            run_llm=False,
+                        )
+                    ]
+                )
+                await asyncio.sleep(0.5)
+                if self.llm._is_assistant_response_trigger_needed():
+                    await self.llm.trigger_assistant_response()
+                else:
+                    await self.task.queue_frames([LLMRunFrame()])
+                self.turn_gate.signal_trigger_sent()
+        else:
+            # No audio file, use text
+            logger.info(f"[Reconnect] No audio file for turn {self.turn_idx}, using text")
+            await self.task.queue_frames(
+                [
+                    LLMMessagesAppendFrame(
+                        messages=[{"role": "user", "content": turn["input"]}],
+                        run_llm=False,
+                    )
+                ]
+            )
+            await asyncio.sleep(0.5)
+            if self.llm._is_assistant_response_trigger_needed():
+                await self.llm.trigger_assistant_response()
+            else:
+                await self.task.queue_frames([LLMRunFrame()])
+            self.turn_gate.signal_trigger_sent()
