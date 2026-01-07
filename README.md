@@ -14,18 +14,20 @@ Text mode models:
 ```
 | Model                   | Tool Use  | Instruction | KB Ground | Pass Rate | Median Rate | TTFB Med | TTFB P95 | TTFB Max |
 |-------------------------|-----------|-------------|-----------|-----------|-------------|----------|----------|----------|
-| gpt-5.1                 | 300/300   | 300/300     | 300/300   | 100.0%    | 100.0%      |  916ms   | 2011ms   | 5216ms   |
-| gemini-3-flash-preview  | 300/300   | 300/300     | 300/300   | 100.0%    | 100.0%      | 1193ms   | 1635ms   | 6653ms   |
-| claude-sonnet-4-5       | 300/300   | 300/300     | 300/300   | 100.0%    | 100.0%      | 2234ms   | 3062ms   | 5438ms   |
-| gpt-4.1                 | 283/300   | 273/300     | 298/300   | 94.9%     | 97.8%       | 683ms    | 1052ms   | 3860ms   |
-| gemini-2.5-flash        | 275/300   | 268/300     | 300/300   | 93.7%     | 94.4%       |  594ms   | 1349ms   | 2104ms   |
-| gpt-5-mini              | 271/300   | 272/300     | 289/300   | 92.4%     | 95.6%       | 6339ms   | 17845ms  | 27028ms  |
-| gpt-4o-mini             | 271/300   | 262/300     | 293/300   | 91.8%     | 92.2%       |  760ms   | 1322ms   | 3256ms   |
-| nemotron-3-nano-30b-a3b | 287/304   | 286/304     | 298/304   | 91.4%     | 93.3%       |   -      |   -      |   -      |
-| gpt-4o                  | 278/300   | 249/300     | 294/300   | 91.2%     | 95.6%       |  625ms   | 1222ms   | 13378ms  |
-| gpt-oss-120b (groq)     | 272/300   | 270/300     | 298/300   | 89.3%     | 90.0%       |   98ms   |  226ms   | 2117ms   |
-| gpt-5.2                 | 224/300   | 228/300     | 250/300   | 78.0%     | 92.2%       |  819ms   | 1483ms   | 1825ms   |
-| claude-haiku-4-5        | 221/300   | 172/300     | 299/300   | 76.9%     | 75.6%       |  732ms   | 1334ms   | 4654ms   |
+| gpt-5.1                   | 300/300   | 300/300     | 300/300   | 100.0%    | 100.0%      |  916ms   | 2011ms   | 5216ms   |
+| gemini-3-flash-preview    | 300/300   | 300/300     | 300/300   | 100.0%    | 100.0%      | 1193ms   | 1635ms   | 6653ms   |
+| claude-sonnet-4-5         | 300/300   | 300/300     | 300/300   | 100.0%    | 100.0%      | 2234ms   | 3062ms   | 5438ms   |
+| gpt-4.1                   | 283/300   | 273/300     | 298/300   | 94.9%     | 97.8%       | 683ms    | 1052ms   | 3860ms   |
+| gemini-2.5-flash          | 275/300   | 268/300     | 300/300   | 93.7%     | 94.4%       |  594ms   | 1349ms   | 2104ms   |
+| gpt-5-mini                | 271/300   | 272/300     | 289/300   | 92.4%     | 95.6%       | 6339ms   | 17845ms  | 27028ms  |
+| gpt-4o-mini               | 271/300   | 262/300     | 293/300   | 91.8%     | 92.2%       |  760ms   | 1322ms   | 3256ms   |
+| gpt-4o                    | 278/300   | 249/300     | 294/300   | 91.2%     | 95.6%       |  625ms   | 1222ms   | 13378ms  |
+| nemotron-3-nano-30b-a3b * | 282/300   | 280/300     | 293/300   | 91.0%     | 93.3%       |  171ms   |  199ms   |  255ms   |
+| gpt-oss-120b (groq)       | 272/300   | 270/300     | 298/300   | 89.3%     | 90.0%       |   98ms   |  226ms   | 2117ms   |
+| gpt-5.2                   | 224/300   | 228/300     | 250/300   | 78.0%     | 92.2%       |  819ms   | 1483ms   | 1825ms   |
+| claude-haiku-4-5          | 221/300   | 172/300     | 299/300   | 76.9%     | 75.6%       |  732ms   | 1334ms   | 4654ms   |
+
+* [ Nemotron 3 Nano running in-cluster on NVIDIA Blackwell hardware ]
 ```
 
 Each conversation in this benchmark is 30 turns. The scores above are aggregated across 10 runs for each model. **Pass Rate** means the percentage of total turns across all runs that the judge model scored as successful. Each run is also scored independently. **Median Rate** is the median individual run pass rate. Think of pass rate as the model's average performance, and the median rate as a way to measure the model's consistency. The older gemini-native-audio-release, for example, often gave very good performance (89.4% median rate), but was prone to poor runs (81.2% pass rate). The newer release is much more consistent (the overall pass rate is much closer to the median rate).
@@ -37,7 +39,7 @@ Speech-to-speech models:
 ```
 |   Model                         | Tool Use  | Instruction | KB Ground | Pass Rate | Median Rate | Non-Tool TTFB Median | Non-Tool TTFB Max | Tool TTFB Mean |
 |---------------------------------|-----------|-------------|-----------|-----------|-------------|----------------------|-------------------|----------------|
-|   ultravox-v0.7                 | 296/300   | 297/300     | 299/300   | 98.0%     | 100.0%      | 1684ms               | 3844ms            | 1889ms         |
+|   ultravox-v0.7                 | 296/300   | 297/300     | 299/300   | 98.0%     | 100.0%      |  564ms               |  772ms            | 1556ms         |
 |   gpt-realtime                  | 267/300   | 265/300     | 300/300   | 92.4%     |  92.8%      | 1028ms               | 3204ms            | 1803ms         |
 |   grok-realtime                 | 264/300   | 257/300     | 296/300   | 90.8%     |  92.8%      | 1108ms               | 9668ms            | 1389ms         |
 |   gemini-native-audio-12-2025   | 253/300   | 259/300     | 286/300   | 88.7%     |  90.0%      | 2868ms               | 5188ms            | 2852ms         | 

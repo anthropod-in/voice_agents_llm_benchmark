@@ -245,6 +245,9 @@ class RealtimePipeline(BasePipeline):
         self.current_turn_audio_path: Optional[str] = None
         self.needs_turn_retry: bool = False
         self.reconnection_grace_until: float = 0
+        # Track when current user audio will finish playing (monotonic time)
+        # This prevents queuing the next turn before current audio finishes
+        self._current_audio_end_time: float = 0
 
     def _is_gemini_live(self) -> bool:
         """Check if current model is Gemini Live."""
@@ -268,6 +271,22 @@ class RealtimePipeline(BasePipeline):
             return False
         m = self.model_name.lower()
         return "ultravox" in m
+
+    def _get_audio_duration(self, audio_path: str) -> float:
+        """Get duration of an audio file in seconds.
+
+        Args:
+            audio_path: Path to the audio file.
+
+        Returns:
+            Duration in seconds, or 0 if unable to determine.
+        """
+        try:
+            info = sf.info(audio_path)
+            return info.duration
+        except Exception as e:
+            logger.warning(f"Could not get duration for {audio_path}: {e}")
+            return 0
 
     def _get_audio_path_for_turn(self, turn_index: int) -> Optional[str]:
         """Get the audio file path for a turn.
@@ -653,11 +672,18 @@ class RealtimePipeline(BasePipeline):
 
         if audio_path:
             try:
+                # Track when this audio will finish playing
+                audio_duration = self._get_audio_duration(audio_path)
+                self._current_audio_end_time = time.monotonic() + audio_duration
+                logger.info(
+                    f"Queued paced audio for first turn: {audio_path} "
+                    f"(duration: {audio_duration:.1f}s)"
+                )
                 self.paced_input.enqueue_wav_file(audio_path)
-                logger.info(f"Queued paced audio for first turn: {audio_path}")
             except Exception as e:
                 logger.exception(f"Failed to queue audio from {audio_path}: {e}")
                 self.current_turn_audio_path = None
+                self._current_audio_end_time = 0
                 # Fall back to text
                 if self._is_gemini_live():
                     await self.task.queue_frames(
@@ -671,6 +697,7 @@ class RealtimePipeline(BasePipeline):
                     await self.task.queue_frames([LLMRunFrame()])
         else:
             # No audio file, use text
+            self._current_audio_end_time = 0
             if self._is_gemini_live():
                 await self.task.queue_frames(
                     [
@@ -690,14 +717,21 @@ class RealtimePipeline(BasePipeline):
 
         if audio_path:
             try:
+                # Track when this audio will finish playing
+                audio_duration = self._get_audio_duration(audio_path)
+                self._current_audio_end_time = time.monotonic() + audio_duration
+                logger.info(
+                    f"Queued paced audio for turn {self.turn_idx}: {audio_path} "
+                    f"(duration: {audio_duration:.1f}s)"
+                )
                 self.paced_input.enqueue_wav_file(audio_path)
-                logger.info(f"Queued paced audio for turn {self.turn_idx}: {audio_path}")
             except Exception as e:
                 logger.exception(f"Failed to queue audio for turn {self.turn_idx}: {e}")
                 audio_path = None
 
         if not audio_path:
             self.current_turn_audio_path = None
+            self._current_audio_end_time = 0
             # Fall back to text
             if self._is_gemini_live():
                 await self.task.queue_frames(
@@ -712,3 +746,34 @@ class RealtimePipeline(BasePipeline):
                 # OpenAI Realtime fallback
                 self.context.add_messages([{"role": "user", "content": turn["input"]}])
                 await self.task.queue_frames([LLMRunFrame()])
+
+    async def _on_turn_end(self, assistant_text: str) -> None:
+        """Override to wait for user audio to finish before advancing turn.
+
+        This prevents the next turn's audio from being queued while the current
+        turn's audio is still playing. Without this, models with aggressive VAD
+        (like gpt-realtime with default settings) may respond prematurely, causing
+        the benchmark to queue the next turn before the current audio finishes.
+        This results in overlapping audio in the recording.
+
+        Args:
+            assistant_text: The assistant's response text.
+        """
+        if self.done:
+            return
+
+        # Wait for current user audio to finish playing before advancing
+        # This ensures clean separation between turns in the recording
+        if self._current_audio_end_time > 0:
+            remaining = self._current_audio_end_time - time.monotonic()
+            if remaining > 0:
+                logger.info(
+                    f"[TurnSync] Waiting {remaining:.1f}s for user audio to finish "
+                    f"before advancing to next turn"
+                )
+                await asyncio.sleep(remaining)
+            # Clear the end time after waiting
+            self._current_audio_end_time = 0
+
+        # Call base class implementation for common turn handling
+        await super()._on_turn_end(assistant_text)

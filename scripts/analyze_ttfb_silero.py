@@ -131,6 +131,7 @@ def detect_segments_silero(
     get_speech_timestamps,
     channel: str,
     min_silence_duration_ms: float = 2000.0,
+    min_speech_duration_ms: float = 900.0,
 ) -> list[AudioSegment]:
     """Detect speech segments using Silero VAD.
 
@@ -141,6 +142,7 @@ def detect_segments_silero(
         get_speech_timestamps: Silero utility function
         channel: "user" or "bot"
         min_silence_duration_ms: Merge segments closer than this
+        min_speech_duration_ms: Minimum speech duration to detect (filters short bursts)
 
     Returns:
         List of AudioSegment objects
@@ -162,7 +164,7 @@ def detect_segments_silero(
         model,
         sampling_rate=16000,
         min_silence_duration_ms=int(min_silence_duration_ms),
-        min_speech_duration_ms=100,
+        min_speech_duration_ms=int(min_speech_duration_ms),
     )
 
     # Convert to AudioSegment objects (in original sample rate timing)
@@ -228,6 +230,8 @@ def analyze_audio(
     model,
     get_speech_timestamps,
     min_silence_duration_ms: float = 2000.0,
+    min_speech_duration_ms: float = 900.0,
+    user_min_silence_ms: float | None = None,
 ) -> tuple[list[TurnTiming], list[AudioSegment], list[AudioSegment], bool]:
     """Analyze conversation.wav for turn timing using Silero VAD.
 
@@ -235,21 +239,28 @@ def analyze_audio(
         wav_path: Path to stereo conversation.wav
         model: Silero VAD model
         get_speech_timestamps: Silero utility function
-        min_silence_duration_ms: Silence gap threshold for merging segments
+        min_silence_duration_ms: Silence gap threshold for merging segments (used for bot)
+        min_speech_duration_ms: Minimum speech duration to detect (filters short bursts)
+        user_min_silence_ms: Optional separate silence threshold for user channel.
+            If not provided, uses min_silence_duration_ms. Lower values (e.g., 500ms)
+            help with models that have aggressive VAD causing short inter-turn gaps.
 
     Returns:
         Tuple of (turns, user_segments, bot_segments, skipped_initial_bot)
     """
     user_audio, bot_audio, sample_rate = load_stereo_wav(wav_path)
 
+    # Use separate silence threshold for user channel if provided
+    user_silence_ms = user_min_silence_ms if user_min_silence_ms is not None else min_silence_duration_ms
+
     # Detect segments using Silero VAD
     user_segments = detect_segments_silero(
         user_audio, sample_rate, model, get_speech_timestamps,
-        "user", min_silence_duration_ms
+        "user", user_silence_ms, min_speech_duration_ms
     )
     bot_segments = detect_segments_silero(
         bot_audio, sample_rate, model, get_speech_timestamps,
-        "bot", min_silence_duration_ms
+        "bot", min_silence_duration_ms, min_speech_duration_ms
     )
 
     # Pair turns
@@ -294,12 +305,19 @@ def compute_ttfb_stats(ttfb_values: list[float], prefix: str = "ttfb") -> dict:
     }
 
 
-def analyze_run(run_dir: Path, min_silence_duration_ms: float = 2000.0) -> Optional[dict]:
+def analyze_run(
+    run_dir: Path,
+    min_silence_duration_ms: float = 2000.0,
+    min_speech_duration_ms: float = 900.0,
+    user_min_silence_ms: float | None = None,
+) -> Optional[dict]:
     """Analyze a single run directory for TTFB metrics using Silero VAD.
 
     Args:
         run_dir: Path to the run directory.
-        min_silence_duration_ms: Silence gap threshold for merging segments.
+        min_silence_duration_ms: Silence gap threshold for merging segments (used for bot).
+        min_speech_duration_ms: Minimum speech duration to detect (filters short bursts).
+        user_min_silence_ms: Optional separate silence threshold for user channel.
 
     Returns:
         Dictionary with TTFB metrics, or None if analysis fails.
@@ -323,7 +341,8 @@ def analyze_run(run_dir: Path, min_silence_duration_ms: float = 2000.0) -> Optio
     # Analyze audio
     try:
         turns, user_segments, bot_segments, skipped_initial_bot = analyze_audio(
-            wav_path, model, get_speech_timestamps, min_silence_duration_ms
+            wav_path, model, get_speech_timestamps,
+            min_silence_duration_ms, min_speech_duration_ms, user_min_silence_ms
         )
     except Exception as e:
         print(f"Error analyzing audio: {e}", file=sys.stderr)
@@ -521,6 +540,19 @@ to segment conversation.wav and calculate TTFB:
         default=2000.0,
         help="Silence gap threshold for merging segments (default: 2000ms)"
     )
+    parser.add_argument(
+        "--min-speech-ms",
+        type=float,
+        default=900.0,
+        help="Minimum speech duration to detect, filters short bursts (default: 900ms)"
+    )
+    parser.add_argument(
+        "--user-min-silence-ms",
+        type=float,
+        default=None,
+        help="Separate silence threshold for user channel (default: same as --min-silence-ms). "
+             "Lower values (e.g., 500) help with models that have aggressive VAD."
+    )
 
     args = parser.parse_args()
 
@@ -528,7 +560,12 @@ to segment conversation.wav and calculate TTFB:
         print(f"Error: Run directory not found: {args.run_dir}", file=sys.stderr)
         sys.exit(1)
 
-    results = analyze_run(args.run_dir, min_silence_duration_ms=args.min_silence_ms)
+    results = analyze_run(
+        args.run_dir,
+        min_silence_duration_ms=args.min_silence_ms,
+        min_speech_duration_ms=args.min_speech_ms,
+        user_min_silence_ms=args.user_min_silence_ms,
+    )
 
     if results is None:
         sys.exit(1)
