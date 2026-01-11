@@ -37,6 +37,10 @@ from scipy.fft import fft
 # Silence torch warnings
 torch.set_num_threads(1)
 
+# Constants for turn-taking analysis
+OVERLAP_THRESHOLD_MS = 100  # Minimum overlap duration to flag (ignore VAD boundary noise)
+UNPROMPTED_GAP_THRESHOLD_MS = 5000  # Max gap from user end to bot start before flagging as unprompted
+
 
 @dataclass
 class TurnMetrics:
@@ -61,6 +65,10 @@ class TurnMetrics:
     tag_alignment_ms: Optional[float] = None  # Log tag - WAV tag (should be ~13ms)
     # Flags
     has_tool_call: bool = False
+    # Retry tracking
+    retry_count: int = 0
+    retry_reasons: list = field(default_factory=list)
+    first_user_end_time: Optional[float] = None  # Monotonic time from log
 
 
 @dataclass
@@ -137,6 +145,82 @@ def parse_rms_onsets_from_log(log_path: Path) -> list[dict]:
                         "rms_db": float(match.group(3)),
                     })
     return onsets
+
+
+def parse_retry_events_from_log(log_path: Path) -> dict[int, list[dict]]:
+    """Parse retry events (empty response, no response, reconnection) from log file.
+
+    Returns:
+        dict mapping turn index to list of retry events for that turn.
+    """
+    from collections import defaultdict
+    retries = defaultdict(list)
+
+    patterns = [
+        (r"\[EMPTY_RESPONSE\] turn=(\d+) retry_count=(\d+)", "empty_response"),
+        (r"\[NO_RESPONSE\] turn=(\d+) retry_count=(\d+)", "no_response"),
+        (r"Gemini reconnected: scheduling turn (\d+) retry", "reconnection"),
+    ]
+
+    if log_path.exists():
+        with open(log_path) as f:
+            for line in f:
+                for pattern, retry_type in patterns:
+                    match = re.search(pattern, line)
+                    if match:
+                        turn_idx = int(match.group(1))
+                        retries[turn_idx].append({
+                            "type": retry_type,
+                            "line": line.strip()
+                        })
+
+    return dict(retries)
+
+
+def parse_first_user_end_from_log(log_path: Path) -> dict[int, float]:
+    """Parse first user audio predicted end times per turn from log file.
+
+    Parses [USER_AUDIO_QUEUED] log entries which contain the predicted end time
+    (monotonic) for the first user audio queued for each turn. For retried turns,
+    only the first occurrence is kept.
+
+    Returns:
+        dict mapping turn index to predicted user audio end time (monotonic).
+    """
+    first_ends = {}
+    pattern = r"\[USER_AUDIO_QUEUED\] turn=(\d+) predicted_end=([0-9.]+)"
+
+    if log_path.exists():
+        with open(log_path) as f:
+            for line in f:
+                match = re.search(pattern, line)
+                if match:
+                    turn_idx = int(match.group(1))
+                    if turn_idx not in first_ends:  # Only keep first occurrence
+                        first_ends[turn_idx] = float(match.group(2))
+
+    return first_ends
+
+
+def parse_recording_baseline_from_log(log_path: Path) -> Optional[float]:
+    """Parse recording baseline monotonic time from log file.
+
+    This is needed to convert monotonic times (like first_user_end_time)
+    to WAV milliseconds for accurate V2V calculation on retried turns.
+
+    Returns:
+        Recording baseline monotonic time, or None if not found.
+    """
+    pattern = r"Recording baseline set at monotonic=([0-9.]+)"
+
+    if log_path.exists():
+        with open(log_path) as f:
+            for line in f:
+                match = re.search(pattern, line)
+                if match:
+                    return float(match.group(1))
+
+    return None
 
 
 def detect_tags_in_wav(
@@ -370,6 +454,9 @@ def analyze_run(run_dir: Path) -> tuple[list[TurnMetrics], AlignmentStats, dict]
     bot_tags_log = parse_bot_tags_from_log(log_path)
     user_tags_log = parse_user_tags_from_log(log_path)
     rms_onsets = parse_rms_onsets_from_log(log_path)
+    retry_events = parse_retry_events_from_log(log_path)
+    first_user_ends = parse_first_user_end_from_log(log_path)
+    recording_baseline = parse_recording_baseline_from_log(log_path)
 
     print("Detecting tags in WAV...", file=sys.stderr)
     bot_tags_wav = detect_tags_in_wav(wav_path, channel=1)  # Right channel
@@ -379,6 +466,27 @@ def analyze_run(run_dir: Path) -> tuple[list[TurnMetrics], AlignmentStats, dict]
     print("Running Silero VAD...", file=sys.stderr)
     model, get_speech_timestamps = load_silero_vad()
     user_segments, bot_segments = run_silero_vad(wav_path, model, get_speech_timestamps)
+
+    # Detect user/bot audio overlaps
+    print("Detecting audio overlaps...", file=sys.stderr)
+    overlaps = []
+    for bot_seg in bot_segments:
+        for user_seg in user_segments:
+            # Check if segments overlap
+            if user_seg["start_ms"] < bot_seg["end_ms"] and user_seg["end_ms"] > bot_seg["start_ms"]:
+                overlap_start = max(user_seg["start_ms"], bot_seg["start_ms"])
+                overlap_end = min(user_seg["end_ms"], bot_seg["end_ms"])
+                overlap_ms = overlap_end - overlap_start
+                if overlap_ms >= OVERLAP_THRESHOLD_MS:
+                    overlaps.append({
+                        "user_start_ms": user_seg["start_ms"],
+                        "user_end_ms": user_seg["end_ms"],
+                        "bot_start_ms": bot_seg["start_ms"],
+                        "bot_end_ms": bot_seg["end_ms"],
+                        "overlap_start_ms": overlap_start,
+                        "overlap_end_ms": overlap_end,
+                        "overlap_ms": overlap_ms,
+                    })
 
     # Check alignment (now returns mapping dictionaries)
     print("Checking alignment...", file=sys.stderr)
@@ -399,6 +507,15 @@ def analyze_run(run_dir: Path) -> tuple[list[TurnMetrics], AlignmentStats, dict]
         if i in transcript:
             m.server_ttfb_ms = transcript[i].get("ttfb_ms")
             m.has_tool_call = len(transcript[i].get("tool_calls", [])) > 0
+
+        # Retry info from log
+        if i in retry_events:
+            m.retry_count = len(retry_events[i])
+            m.retry_reasons = [r["type"] for r in retry_events[i]]
+
+        # First user end time from log (for accurate V2V on retried turns)
+        if i in first_user_ends:
+            m.first_user_end_time = first_user_ends[i]
 
         # Bot tag from log
         if i < len(bot_tags_log):
@@ -452,7 +569,13 @@ def analyze_run(run_dir: Path) -> tuple[list[TurnMetrics], AlignmentStats, dict]
             m.pipeline_ttfb_ms = m.bot_tag_log_ms - m.user_end_ms
 
         if m.bot_silero_start_ms is not None and m.user_end_ms is not None:
-            m.wav_v2v_ms = m.bot_silero_start_ms - m.user_end_ms
+            # For retried turns, use first_user_end_time (converted to WAV ms) for accurate V2V
+            # This measures total latency including the failed attempt(s), not just the retry
+            if m.retry_count > 0 and m.first_user_end_time is not None and recording_baseline is not None:
+                first_user_end_wav_ms = (m.first_user_end_time - recording_baseline) * 1000
+                m.wav_v2v_ms = m.bot_silero_start_ms - first_user_end_wav_ms
+            else:
+                m.wav_v2v_ms = m.bot_silero_start_ms - m.user_end_ms
 
         if m.bot_rms_onset_ms is not None and m.bot_tag_log_ms is not None:
             m.silent_pad_rms_ms = m.bot_rms_onset_ms - m.bot_tag_log_ms
@@ -466,12 +589,46 @@ def analyze_run(run_dir: Path) -> tuple[list[TurnMetrics], AlignmentStats, dict]
 
         turns.append(m)
 
+    # Detect unmatched (orphan) bot segments - segments not associated with any turn
+    matched_bot_seg_starts = {m.bot_silero_start_ms for m in turns if m.bot_silero_start_ms is not None}
+    unmatched_bot_segments = []
+    for seg in bot_segments:
+        if seg["start_ms"] not in matched_bot_seg_starts:
+            unmatched_bot_segments.append({
+                "start_ms": seg["start_ms"],
+                "end_ms": seg["end_ms"],
+                "duration_ms": seg["end_ms"] - seg["start_ms"],
+            })
+
+    # Detect unprompted bot responses - bot segments that started without recent user speech
+    unprompted_bot_segments = []
+    for bot_seg in bot_segments:
+        # Find the user segment that ends closest before this bot segment starts
+        best_user_end = None
+        for user_seg in user_segments:
+            if user_seg["end_ms"] <= bot_seg["start_ms"]:
+                if best_user_end is None or user_seg["end_ms"] > best_user_end:
+                    best_user_end = user_seg["end_ms"]
+
+        # If no user segment ends within threshold before bot starts, it's unprompted
+        gap_ms = None if best_user_end is None else bot_seg["start_ms"] - best_user_end
+        if gap_ms is None or gap_ms > UNPROMPTED_GAP_THRESHOLD_MS:
+            unprompted_bot_segments.append({
+                "start_ms": bot_seg["start_ms"],
+                "end_ms": bot_seg["end_ms"],
+                "duration_ms": bot_seg["end_ms"] - bot_seg["start_ms"],
+                "gap_from_last_user_ms": gap_ms,
+            })
+
     # Build summary stats
     summary = {
         "run_dir": str(run_dir),
         "num_turns": n_turns,
         "user_segments": len(user_segments),
         "bot_segments": len(bot_segments),
+        "overlaps": overlaps,
+        "unmatched_bot_segments": unmatched_bot_segments,
+        "unprompted_bot_segments": unprompted_bot_segments,
     }
 
     # Calculate stats for each metric
@@ -630,6 +787,9 @@ It also verifies log/WAV alignment using audio tags.
                     "bot_rms_onset_ms": t.bot_rms_onset_ms,
                     "bot_silero_start_ms": t.bot_silero_start_ms,
                     "bot_silero_end_ms": t.bot_silero_end_ms,
+                    "retry_count": t.retry_count,
+                    "retry_reasons": t.retry_reasons,
+                    "first_user_end_time": t.first_user_end_time,
                 }
                 for t in turns
             ],

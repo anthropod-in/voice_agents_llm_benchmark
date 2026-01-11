@@ -9,6 +9,15 @@ Turn-taking failures are detected when:
 3. Severe alignment drift: tag_alignment_ms outside ±100ms tolerance
 4. Missing bot detection: bot_tag_wav_ms is null (log tag not found in WAV)
 5. Anomalous silent padding: silent_pad_silero_ms > 5000ms
+6. Audio overlap: user and bot speaking simultaneously (per-turn)
+7. Empty response: model returned control tokens only, no actual speech
+8. No response: model never responded at all (no TTS within 15s timeout)
+9. Reconnection: session timeout forced reconnect mid-turn
+
+Global issues (not per-turn):
+- Audio overlaps detected across all segments
+- Unmatched bot segments (orphan responses not associated with any turn)
+- Unprompted bot responses (bot speaking without recent user speech)
 """
 
 import json
@@ -47,6 +56,11 @@ class TurnTakingAnalysis:
     failed_turns: list[int] = field(default_factory=list)
     per_turn: dict[int, TurnTakingResult] = field(default_factory=dict)
     error: Optional[str] = None
+    # Global issues (not per-turn)
+    global_issues: list[str] = field(default_factory=list)
+    overlaps: list[dict] = field(default_factory=list)
+    unmatched_bot_segments: list[dict] = field(default_factory=list)
+    unprompted_bot_segments: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -55,6 +69,10 @@ class TurnTakingAnalysis:
             "failed_turns": self.failed_turns,
             "per_turn": {k: v.to_dict() for k, v in self.per_turn.items()},
             "error": self.error,
+            "global_issues": self.global_issues,
+            "overlaps": self.overlaps,
+            "unmatched_bot_segments": self.unmatched_bot_segments,
+            "unprompted_bot_segments": self.unprompted_bot_segments,
         }
 
 
@@ -94,11 +112,12 @@ def analyze_turn_metrics_json(run_dir: Path) -> Optional[dict]:
         return None
 
 
-def detect_turn_taking_issues(turn_data: dict) -> list[str]:
+def detect_turn_taking_issues(turn_data: dict, overlaps: list[dict] = None) -> list[str]:
     """Detect turn-taking issues for a single turn.
 
     Args:
         turn_data: Dict with turn metrics from analyze_turn_metrics.py
+        overlaps: List of overlap dicts from analyze_turn_metrics.py (optional)
 
     Returns:
         List of issue descriptions (empty if no issues).
@@ -128,6 +147,37 @@ def detect_turn_taking_issues(turn_data: dict) -> list[str]:
     silent_pad = turn_data.get("silent_pad_silero_ms")
     if silent_pad is not None and silent_pad > MAX_SILENT_PAD_MS:
         issues.append(f"high_silent_pad ({silent_pad:.0f}ms)")
+
+    # 6. Audio overlap affecting this turn
+    if overlaps:
+        turn_start = turn_data.get("user_start_ms")
+        turn_end = turn_data.get("bot_silero_end_ms")
+        if turn_start is not None and turn_end is not None:
+            for overlap in overlaps:
+                overlap_start = overlap.get("overlap_start_ms", 0)
+                overlap_end = overlap.get("overlap_end_ms", 0)
+                overlap_ms = overlap.get("overlap_ms", 0)
+                # Check if overlap falls within this turn's time range
+                if overlap_start >= turn_start and overlap_end <= turn_end:
+                    issues.append(f"audio_overlap ({overlap_ms:.0f}ms)")
+                    break  # Only flag once per turn
+
+    # 7. Empty response (model returned control tokens only, no actual speech)
+    # 8. No response (model never responded at all)
+    # 9. Reconnection (session timeout forced reconnect mid-turn, but not turn 0)
+    retry_reasons = turn_data.get("retry_reasons", [])
+    turn_index = turn_data.get("turn", -1)
+    if retry_reasons:
+        empty_count = sum(1 for r in retry_reasons if r == "empty_response")
+        no_response_count = sum(1 for r in retry_reasons if r == "no_response")
+        reconnection_count = sum(1 for r in retry_reasons if r == "reconnection")
+        if empty_count > 0:
+            issues.append(f"empty_response ({empty_count} retries)")
+        if no_response_count > 0:
+            issues.append(f"no_response ({no_response_count} retries)")
+        # Turn 0 reconnections are expected (initial connection setup)
+        if reconnection_count > 0 and turn_index != 0:
+            issues.append(f"reconnection ({reconnection_count} retries)")
 
     return issues
 
@@ -159,6 +209,31 @@ def analyze_turn_taking(run_dir: Path) -> TurnTakingAnalysis:
         result.error = "Failed to analyze turn metrics"
         return result
 
+    # Extract global issues from summary
+    summary = metrics.get("summary", {})
+    overlaps = summary.get("overlaps", [])
+    unmatched_segs = summary.get("unmatched_bot_segments", [])
+    unprompted_segs = summary.get("unprompted_bot_segments", [])
+
+    # Store raw data
+    result.overlaps = overlaps
+    result.unmatched_bot_segments = unmatched_segs
+    result.unprompted_bot_segments = unprompted_segs
+
+    # Build global issues list
+    if overlaps:
+        total_overlap = sum(o.get("overlap_ms", 0) for o in overlaps)
+        result.global_issues.append(f"audio_overlap: {len(overlaps)} instances, {total_overlap:.0f}ms total")
+        result.overall_ok = False
+
+    if unmatched_segs:
+        result.global_issues.append(f"unmatched_bot_segments: {len(unmatched_segs)} orphan segments")
+        result.overall_ok = False
+
+    if unprompted_segs:
+        result.global_issues.append(f"unprompted_bot_responses: {len(unprompted_segs)} segments without user trigger")
+        result.overall_ok = False
+
     # Analyze each turn
     turns_data = metrics.get("turns", [])
     for turn_data in turns_data:
@@ -166,7 +241,7 @@ def analyze_turn_taking(run_dir: Path) -> TurnTakingAnalysis:
         if turn_idx < 0:
             continue
 
-        issues = detect_turn_taking_issues(turn_data)
+        issues = detect_turn_taking_issues(turn_data, overlaps=overlaps)
         turn_result = TurnTakingResult(
             turn_index=turn_idx,
             turn_taking_ok=len(issues) == 0,
@@ -200,6 +275,24 @@ def main():
         print(f"Overall OK: {result.overall_ok}")
         if result.error:
             print(f"Error: {result.error}")
+        if result.global_issues:
+            print("Global issues:")
+            for issue in result.global_issues:
+                print(f"  - {issue}")
+        if result.overlaps:
+            print(f"Overlaps ({len(result.overlaps)}):")
+            for o in result.overlaps:
+                print(f"  - {o['overlap_start_ms']:.0f}-{o['overlap_end_ms']:.0f}ms ({o['overlap_ms']:.0f}ms)")
+        if result.unmatched_bot_segments:
+            print(f"Unmatched bot segments ({len(result.unmatched_bot_segments)}):")
+            for seg in result.unmatched_bot_segments:
+                print(f"  - {seg['start_ms']:.0f}-{seg['end_ms']:.0f}ms ({seg['duration_ms']:.0f}ms)")
+        if result.unprompted_bot_segments:
+            print(f"Unprompted bot segments ({len(result.unprompted_bot_segments)}):")
+            for seg in result.unprompted_bot_segments:
+                gap = seg.get('gap_from_last_user_ms')
+                gap_str = f", gap={gap:.0f}ms" if gap is not None else ", no preceding user"
+                print(f"  - {seg['start_ms']:.0f}-{seg['end_ms']:.0f}ms ({seg['duration_ms']:.0f}ms{gap_str})")
         if result.failed_turns:
             print(f"Failed turns: {result.failed_turns}")
             for turn_idx in result.failed_turns:

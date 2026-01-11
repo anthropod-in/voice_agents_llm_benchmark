@@ -45,6 +45,7 @@ Silent Padding (RMS) ≈ Silent Padding (Silero) - 100ms  (RMS triggers earlier)
 | `scripts/analyze_turn_metrics.py` | **All metrics** - Server TTFB, Pipeline TTFB, WAV V2V, Silent Padding (RMS & Silero), alignment check |
 | `scripts/analyze_ttfb_silero.py` | WAV V2V only (Silero-based) |
 | `scripts/detect_audio_tags.py` | Tag positions for alignment verification |
+| `scripts/benchmark_summary.py` | **Aggregate benchmark results** - Multi-run summary table with scores and V2V metrics |
 
 ---
 
@@ -117,6 +118,69 @@ Summary Statistics:
 ```
 
 `[T]` indicates turns with tool calls (typically higher latency).
+
+---
+
+### `benchmark_summary.py` - Multi-Run Aggregate Summary
+
+**Usage:**
+```bash
+# Summarize runs by glob patterns
+uv run python scripts/benchmark_summary.py \
+    "runs/aiwf_medium_context/20260111T*ultravox*" \
+    "runs/aiwf_medium_context/20260111T*gpt-realtime*" \
+    "runs/aiwf_medium_context/20260111T*grok-realtime*" \
+    "runs/aiwf_medium_context/20260110T2*gemini*"
+
+# Exclude specific runs (e.g., failed runs)
+uv run python scripts/benchmark_summary.py \
+    "runs/aiwf_medium_context/20260111T*grok*" \
+    --exclude "runs/aiwf_medium_context/20260111T005820_grok-realtime_5fbc589b"
+
+# JSON output for programmatic use
+uv run python scripts/benchmark_summary.py "runs/aiwf_medium_context/*ultravox*" --json
+```
+
+**Data Sources:**
+1. `claude_judged.jsonl` → Tool use, instruction following, KB grounding, turn-taking scores
+2. `scripts/analyze_turn_metrics.py` → WAV V2V metrics, silence padding (called internally)
+
+**Output Columns:**
+
+| Column | Header | Description |
+|--------|--------|-------------|
+| Model | `Model` | Model name (with aliases, e.g., gemini-live) |
+| Tool Use | `Tool Use` | Correct/total tool use scores across all runs |
+| Instruction | `Instruction` | Correct/total instruction following scores |
+| KB Ground | `KB Ground` | Correct/total knowledge base grounding scores |
+| Turn Ok | `Turn Ok` | Correct/total turn-taking scores |
+| Pass Rate | `Pass Rate` | Percentage of turns passing all quality metrics |
+| Non-Tool V2V Med | `Non-Tool V2V Med` | Median voice-to-voice latency for non-tool turns |
+| Non-Tool V2V Max | `Non-Tool V2V Max` | Maximum voice-to-voice latency for non-tool turns |
+| Tool V2V Mean | `Tool V2V Mean` | Mean voice-to-voice latency for tool call turns |
+| Silence Pad Mean | `Silence Pad Mean` | Mean silent audio padding before speech |
+
+**Example Output:**
+```
+-----------------------------------------------------------------------------------------------------------------------------------------
+| Model             | Tool    | Instruction | KB       | Turn    | Pass     | Non-Tool V2V  | Non-Tool V2V  | Tool V2V   | Silence Pad  |
+|                   | Use     |             | Ground   | Ok      | Rate     | Med           | Max           | Mean       | Mean         |
+-----------------------------------------------------------------------------------------------------------------------------------------
+| gemini-live       | 272/300 | 269/300     | 293/300  | 291/300 |  89.7% | 2432ms        | 11807ms       | 4415ms     | 60ms         |
+-----------------------------------------------------------------------------------------------------------------------------------------
+| gpt-realtime      | 269/300 | 260/300     | 300/300  | 283/300 |  86.7% | 1232ms        | 3104ms        | 1803ms     | 263ms        |
+-----------------------------------------------------------------------------------------------------------------------------------------
+| ultravox-v0.7     | 293/300 | 289/300     | 299/300  | 271/300 |  96.3% | 832ms         | 2656ms        | 2297ms     | 596ms        |
+-----------------------------------------------------------------------------------------------------------------------------------------
+```
+
+**Features:**
+- Accepts multiple glob patterns to combine runs from different models
+- Automatic model name detection from run directory names
+- Model aliases (e.g., `gemini-2.5-flash-native-audio-preview-12-2025` → `gemini-live`)
+- `--exclude` flag to skip specific runs (useful for failed/incomplete runs)
+- Groups runs by model automatically
+- Aggregates V2V metrics from WAV analysis via `analyze_turn_metrics.py`
 
 ---
 
