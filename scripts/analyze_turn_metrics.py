@@ -69,6 +69,8 @@ class TurnMetrics:
     retry_count: int = 0
     retry_reasons: list = field(default_factory=list)
     first_user_end_time: Optional[float] = None  # Monotonic time from log
+    # Reconnection tracking - if > 0, timing data is invalid
+    reconnection_count: int = 0
 
 
 @dataclass
@@ -529,6 +531,7 @@ def analyze_run(run_dir: Path) -> tuple[list[TurnMetrics], AlignmentStats, dict]
         if i in transcript:
             m.server_ttfb_ms = transcript[i].get("ttfb_ms")
             m.has_tool_call = len(transcript[i].get("tool_calls", [])) > 0
+            m.reconnection_count = transcript[i].get("reconnection_count", 0)
 
         # Retry info from log
         if i in retry_events:
@@ -587,23 +590,28 @@ def analyze_run(run_dir: Path) -> tuple[list[TurnMetrics], AlignmentStats, dict]
                 m.user_end_ms = best_user_seg["end_ms"]
 
         # Calculate derived metrics
-        if m.bot_tag_log_ms is not None and m.user_end_ms is not None:
-            m.pipeline_ttfb_ms = m.bot_tag_log_ms - m.user_end_ms
+        # Skip timing calculation for reconnected turns - timing data is invalid
+        if m.reconnection_count > 0:
+            print(f"Turn {i}: Skipping timing (reconnection_count={m.reconnection_count})", file=sys.stderr)
+            # Leave timing fields as None
+        else:
+            if m.bot_tag_log_ms is not None and m.user_end_ms is not None:
+                m.pipeline_ttfb_ms = m.bot_tag_log_ms - m.user_end_ms
 
-        if m.bot_silero_start_ms is not None and m.user_end_ms is not None:
-            # For retried turns, use first_user_end_time (converted to WAV ms) for accurate V2V
-            # This measures total latency including the failed attempt(s), not just the retry
-            if m.retry_count > 0 and m.first_user_end_time is not None and recording_baseline is not None:
-                first_user_end_wav_ms = (m.first_user_end_time - recording_baseline) * 1000
-                m.wav_v2v_ms = m.bot_silero_start_ms - first_user_end_wav_ms
-            else:
-                m.wav_v2v_ms = m.bot_silero_start_ms - m.user_end_ms
+            if m.bot_silero_start_ms is not None and m.user_end_ms is not None:
+                # For retried turns, use first_user_end_time (converted to WAV ms) for accurate V2V
+                # This measures total latency including the failed attempt(s), not just the retry
+                if m.retry_count > 0 and m.first_user_end_time is not None and recording_baseline is not None:
+                    first_user_end_wav_ms = (m.first_user_end_time - recording_baseline) * 1000
+                    m.wav_v2v_ms = m.bot_silero_start_ms - first_user_end_wav_ms
+                else:
+                    m.wav_v2v_ms = m.bot_silero_start_ms - m.user_end_ms
 
-        if m.bot_rms_onset_ms is not None and m.bot_tag_log_ms is not None:
-            m.silent_pad_rms_ms = m.bot_rms_onset_ms - m.bot_tag_log_ms
+            if m.bot_rms_onset_ms is not None and m.bot_tag_log_ms is not None:
+                m.silent_pad_rms_ms = m.bot_rms_onset_ms - m.bot_tag_log_ms
 
-        if m.bot_silero_start_ms is not None and m.bot_tag_wav_ms is not None:
-            m.silent_pad_silero_ms = m.bot_silero_start_ms - m.bot_tag_wav_ms
+            if m.bot_silero_start_ms is not None and m.bot_tag_wav_ms is not None:
+                m.silent_pad_silero_ms = m.bot_silero_start_ms - m.bot_tag_wav_ms
 
         # Update prev_bot_seg_end for next iteration
         if m.bot_silero_end_ms is not None:
@@ -831,6 +839,7 @@ It also verifies log/WAV alignment using audio tags.
                     "retry_count": t.retry_count,
                     "retry_reasons": t.retry_reasons,
                     "first_user_end_time": t.first_user_end_time,
+                    "reconnection_count": t.reconnection_count,
                 }
                 for t in turns
             ],

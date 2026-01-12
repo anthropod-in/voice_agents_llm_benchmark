@@ -42,23 +42,23 @@ Speech-to-speech models:
 | Model             | Tool    | Instruction | KB       | Turn    | Pass     | Non-Tool V2V  | Non-Tool V2V  | Tool V2V   | Silence Pad  |
 |                   | Use     |             | Ground   | Ok      | Rate     | Med           | Max           | Mean       | Mean         |
 -----------------------------------------------------------------------------------------------------------------------------------------
-| ultravox-v0.7     | 293/300 | 294/300     | 298/300  | 300/300 |   97.7%  | 864ms         | 1888ms        | 2406ms     | 82ms         |
+| ultravox-v0.7     | 293/300 | 294/300     | 298/300  | 300/300 |   97.7%  | 864ms         |  1888ms       | 2406ms     | 82ms         |
 -----------------------------------------------------------------------------------------------------------------------------------------
-| gpt-realtime      | 271/300 | 260/300     | 300/300  | 296/300 |   86.7%  | 1536ms        | 4672ms        | 2199ms     | 341ms        |
+| gpt-realtime      | 271/300 | 260/300     | 300/300  | 296/300 |   86.7%  | 1536ms        |  4672ms       | 2199ms     | 341ms        |
 -----------------------------------------------------------------------------------------------------------------------------------------
-| gemini-live       | 258/300 | 261/300     | 293/300  | 278/300 |   86.0%  | 2624ms        | 61747ms       | 4082ms     | 90ms         |
+| gemini-live       | 258/300 | 261/300     | 293/300  | 278/300 |   86.0%  | 2624ms        | 30000ms       | 4082ms     | 90ms         |
 -----------------------------------------------------------------------------------------------------------------------------------------
-| * nova-2-sonic    | 278/300 | 265/300     | 296/300  | *       |  (93.2%) | *             | *             | *          | *            |
+| * nova-2-sonic    | 249/300 | 170/300     | 249/300  | *       |   *      | 1312ms        |  3456ms       | 1689ms     | 489ms        |
 -----------------------------------------------------------------------------------------------------------------------------------------
-| * grok-realtime   | 267/300 | 275/300     | 295/300  | *       |  (89.0%) | 1184ms        | 2016ms        | 1472ms     | 478ms        |
+| * grok-realtime   | 267/300 | 275/300     | 295/300  | *       |   *      | 1184ms        |  2016ms       | 1472ms     | 478ms        |
 -----------------------------------------------------------------------------------------------------------------------------------------
 ```
 
 Speech-to-speech models, which take audio as input and generate audio as output. For these models, we measure voice-to-voice latency by analyzing the saved audio files and measuring the time from the end of the user's audio to the beginning of the model's speech audio response. This latency is different from the TTFB reported by the Pipecat service for these models, because all of these models were tested in server-side VAD mode (so the server-side turn delay is opaque to the Pipecat pipeline), and all of the models send initial silence bytes before actual speech audio. (Text-to-speech models do this, too. The initial silence segments are typically between 150ms and 250ms for standalone TTS models.)
 
-We also include a "Turn Ok" column for these models, which counts how often the model does not respond at all when we expect it to. This is a difficult metric to specify precisely. Are general API failures and disconnects turn failures? We're conservative, here, only including in turn failures model non-responsiveness or extremely slow response while the persistent session remains connected.
-
-The APIs for the Grok and AWS Nova 2 Sonic models are currently unreliable enough that to use them in production would require a very large amount of defensive programming at the application level. These are the second and third best performing models, **when they complete a full 30-turn conversation**. But performance is unstable: the AWS model frequently emits content refusals for normal content and has an 8 minute connection limit; its context prefill often fails with errors; the Grok API returns errors for all actions in the middle of a session and may or may not recover.
+We also include a "Turn Ok" column for these models, which counts how often the model does not respond at all when we expect it or responds with control characters, API refusals, or generic errors.
+A
+The APIs for the Grok and AWS Nova 2 Sonic models are currently unreliable enough that to use them in production would require a very large amount of defensive programming at the application level. The AWS model frequently emits content refusals for normal content and has an 8 minute connection limit; its context prefill often fails with errors; the Grok API returns errors for all actions in the middle of a session and may or may not recover.
 
 ## Model Notes
 
