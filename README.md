@@ -16,19 +16,19 @@ Text mode models:
 | gpt-5.1                   | 300/300   | 300/300     | 300/300   | 100.0%    | 100.0%      |  916ms   | 2011ms   | 5216ms   |
 | gemini-3-flash-preview    | 300/300   | 300/300     | 300/300   | 100.0%    | 100.0%      | 1193ms   | 1635ms   | 6653ms   |
 | claude-sonnet-4-5         | 300/300   | 300/300     | 300/300   | 100.0%    | 100.0%      | 2234ms   | 3062ms   | 5438ms   |
-| gpt-4.1                   | 283/300   | 273/300     | 298/300   | 94.9%     | 97.8%       | 683ms    | 1052ms   | 3860ms   |
+| gpt-4.1 †                 | 283/300   | 273/300     | 298/300   | 94.9%     | 97.8%       | 683ms    | 1052ms   | 3860ms   |
 | gemini-2.5-flash †        | 275/300   | 268/300     | 300/300   | 93.7%     | 94.4%       |  594ms   | 1349ms   | 2104ms   |
 | nova-2-pro-preview        | 288/300   | 278/300     | 289/300   | 92.7%     | 93.3%       |  686ms   |  750ms   | 1459ms   |
 | gpt-5-mini                | 271/300   | 272/300     | 289/300   | 92.4%     | 95.6%       | 6339ms   | 17845ms  | 27028ms  |
 | gpt-4o-mini               | 271/300   | 262/300     | 293/300   | 91.8%     | 92.2%       |  760ms   | 1322ms   | 3256ms   |
-| gpt-4o †                  | 278/300   | 249/300     | 294/300   | 91.2%     | 95.6%       |  625ms   | 1222ms   | 13378ms  |
+| gpt-4o                    | 278/300   | 249/300     | 294/300   | 91.2%     | 95.6%       |  625ms   | 1222ms   | 13378ms  |
 | nemotron-3-nano-30b-a3b * | 282/300   | 280/300     | 293/300   | 91.0%     | 93.3%       |  171ms   |  199ms   |  255ms   |
 | gpt-oss-120b (groq)       | 272/300   | 270/300     | 298/300   | 89.3%     | 90.0%       |   98ms   |  226ms   | 2117ms   |
 | gpt-5.2                   | 224/300   | 228/300     | 250/300   | 78.0%     | 92.2%       |  819ms   | 1483ms   | 1825ms   |
 | claude-haiku-4-5          | 221/300   | 172/300     | 299/300   | 76.9%     | 75.6%       |  732ms   | 1334ms   | 4654ms   |
 
 
-> - [ † ] - gpt-4o and gemini-2.5-flash are used for most production voice agents because they currently offer the best balance of overall intelligence and low TTFB.
+> - [ † ] - gpt-4.1 and gemini-2.5-flash are used for most production voice agents because they currently offer the best balance of overall intelligence and low TTFB.
 > - [ * ] - Nemotron 3 Nano running in-cluster on NVIDIA Blackwell hardware
 
 Each conversation in this benchmark is 30 turns. The scores above are aggregated across 10 runs for each model. **Pass Rate** means the percentage of total turns across all runs that the judge model scored as successful. Each run is also scored independently. **Median Rate** is the median individual run pass rate. Think of pass rate as the model's average performance, and the median rate as a way to measure the model's consistency. See gpt-5.2, for example, which has a pass rate of 78.0% but a median rate of 92.2%, indicating that while it performs well on average, it can have very poor runs that drag down the median conversation score.
@@ -42,14 +42,16 @@ Speech-to-speech models:
 | ultravox-v0.7     | 293/300 | 294/300     | 298/300  | 300/300 |   97.7%  | 864ms         |  1888ms       | 2406ms     | 82ms         |
 | gpt-realtime      | 271/300 | 260/300     | 300/300  | 296/300 |   86.7%  | 1536ms        |  4672ms       | 2199ms     | 341ms        |
 | gemini-live       | 258/300 | 261/300     | 293/300  | 278/300 |   86.0%  | 2624ms        | 30000ms       | 4082ms     | 90ms         |
-| nova-2-sonic      | 259/300 | 219/300     | 247/300  | *       |   *      | 1280ms        |  3232ms       | 1689ms     | 79ms         |
+| nova-2-sonic      | 278/300 | 265/300     | 296/300  | *       |   *      | 1280ms        |  3232ms       | 1689ms     | 79ms         |
 | grok-realtime     | 267/300 | 275/300     | 295/300  | *       |   *      | 1184ms        |  2016ms       | 1472ms     | 478ms        |
 
 For speech-to-speech models, we measure voice-to-voice latency by analyzing the conversation recording. We measure the overall time from the end of the user's speech to the beginning of the model's speech response. This latency is different from the TTFB reported by the Pipecat service for these models, because all of these models were tested in server-side VAD mode (the server-side turn delay is opaque to the Pipecat pipeline), and all of the models send initial silence bytes before actual speech audio. (Text-to-speech models do this, too. The initial silence segments are typically between 150ms and 250ms for standalone TTS models.)
 
 We also include a "Turn Ok" column for these models, which counts how often the model does not respond at all when we expect it or responds with control characters, API refusals, or generic errors.
 
-The APIs for the Grok and AWS Nova 2 Sonic models are currently not production ready. The AWS model frequently emits content refusals for normal content and has an 8 minute connection limit; its context prefill often fails with errors; the Grok API often enters into an unrecoverable state during a session.
+The API for Grok is currently not production ready. Grok often enters into an unrecoverable state during a session.
+
+The Nova 2 Sonic model performs very well on instruction following and tool calling but has a high rate of safety refusals for normal content. It also has a connection limit of 8 minutes. Fixes for both of these issues are in flight from AWS.
 
 ### Sample Recordings
 
