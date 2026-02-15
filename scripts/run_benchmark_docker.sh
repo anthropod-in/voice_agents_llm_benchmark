@@ -85,5 +85,6 @@ docker run --rm -it \
   -v "$PWD":/workspace \
   --env-file "$PWD/.env" \
   -e HOME=/tmp \
+  -e UV_PYTHON=3.12 \
   "${IMAGE_NAME}" \
-  bash -lc "uv sync && bash scripts/run_benchmark_across_models.sh --benchmark \"${BENCHMARK}\" --judge-model \"${JUDGE_MODEL}\" --cases \"${CASES}\" --runs-per-case \"${RUNS_PER_CASE}\""
+  bash -lc "uv sync --python 3.12 && bash scripts/run_benchmark_across_models.sh --benchmark \"${BENCHMARK}\" --judge-model \"${JUDGE_MODEL}\" --cases \"${CASES}\" --runs-per-case \"${RUNS_PER_CASE}\""
