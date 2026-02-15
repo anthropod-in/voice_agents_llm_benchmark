@@ -51,6 +51,8 @@ except ImportError:
 
 JUDGE_VERSION = "multi-judge-v4-turn-taking"
 JUDGE_MODEL = "claude-opus-4-5"
+JUDGE_MAX_ATTEMPTS = 3
+JUDGE_RETRY_BASE_DELAY_SECS = 2.0
 
 # System prompt for the two-phase judge
 JUDGE_SYSTEM_PROMPT = """# Role
@@ -378,14 +380,72 @@ async def _query_gemini_judge(prompt: str, judge_model: str) -> str:
     return resp.text or ""
 
 
+def _is_retryable_judge_error(exc: Exception) -> bool:
+    """Return True if exception looks transient and worth retrying."""
+    msg = str(exc).lower()
+    retry_markers = (
+        "rate limit",
+        "ratelimit",
+        "429",
+        "resource exhausted",
+        "too many requests",
+        "timeout",
+        "timed out",
+        "temporarily unavailable",
+        "service unavailable",
+        "internal server error",
+        "bad gateway",
+        "connection reset",
+        "connection aborted",
+        "connection error",
+    )
+    return any(marker in msg for marker in retry_markers)
+
+
+async def _query_with_retries(
+    query_fn,
+    prompt: str,
+    judge_model: str,
+    provider: str,
+) -> str:
+    """Retry transient judge failures with exponential backoff."""
+    last_error: Optional[Exception] = None
+    for attempt in range(1, JUDGE_MAX_ATTEMPTS + 1):
+        try:
+            return await query_fn(prompt, judge_model)
+        except Exception as exc:
+            last_error = exc
+            retryable = _is_retryable_judge_error(exc)
+            if (not retryable) or (attempt >= JUDGE_MAX_ATTEMPTS):
+                raise
+
+            delay = JUDGE_RETRY_BASE_DELAY_SECS * (2 ** (attempt - 1))
+            print(
+                f"WARN: judge query failed (provider={provider}, model={judge_model}, "
+                f"attempt={attempt}/{JUDGE_MAX_ATTEMPTS}); retrying in {delay:.1f}s: {exc}",
+                file=sys.stderr,
+            )
+            await asyncio.sleep(delay)
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("Judge query failed without exception details")
+
+
 async def _query_judge(prompt: str, judge_model: str) -> str:
     """Route judge query to backend based on model name."""
     provider = _infer_judge_provider(judge_model)
     if provider == "claude":
-        return await _query_claude_judge(prompt, judge_model)
+        return await _query_with_retries(
+            _query_claude_judge, prompt, judge_model, provider
+        )
     if provider == "gemini":
-        return await _query_gemini_judge(prompt, judge_model)
-    return await _query_openai_judge(prompt, judge_model)
+        return await _query_with_retries(
+            _query_gemini_judge, prompt, judge_model, provider
+        )
+    return await _query_with_retries(
+        _query_openai_judge, prompt, judge_model, provider
+    )
 
 
 async def judge_with_claude(
