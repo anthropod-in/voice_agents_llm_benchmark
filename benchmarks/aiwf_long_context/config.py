@@ -1,4 +1,4 @@
-"""Configuration for the long context benchmark (~24K tokens)."""
+"""Configuration for the long context benchmark (~30K tokens)."""
 from pathlib import Path
 
 from benchmarks._shared import turns, ToolsSchemaForTest
@@ -10,7 +10,7 @@ class BenchmarkConfig:
 
     # Benchmark metadata
     name = "aiwf_long_context"
-    description = "Long context benchmark with ~24K token knowledge base"
+    description = "Long context benchmark with ~30K token knowledge base"
 
     # Shared data
     turns = turns

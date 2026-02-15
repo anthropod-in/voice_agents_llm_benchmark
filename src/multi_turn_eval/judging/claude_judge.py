@@ -29,16 +29,27 @@ from dotenv import load_dotenv
 try:
     from claude_agent_sdk import query, ClaudeAgentOptions
 except ImportError:
-    print("ERROR: claude-agent-sdk not installed.", file=sys.stderr)
-    print("Install with: uv add claude-agent-sdk", file=sys.stderr)
-    sys.exit(1)
+    query = None
+    ClaudeAgentOptions = None
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
+try:
+    from google import genai
+    from google.genai import types as genai_types
+except ImportError:
+    genai = None
+    genai_types = None
 
 
 # ============================================================================
 # Configuration
 # ============================================================================
 
-JUDGE_VERSION = "claude-agent-sdk-v4-turn-taking"
+JUDGE_VERSION = "multi-judge-v4-turn-taking"
 JUDGE_MODEL = "claude-opus-4-5"
 
 # System prompt for the two-phase judge
@@ -289,12 +300,101 @@ def format_turns_for_claude(
 # Claude Judge
 # ============================================================================
 
+
+def _infer_judge_provider(judge_model: str) -> str:
+    """Infer judge backend from model name."""
+    model = (judge_model or "").lower()
+    if model.startswith("claude"):
+        return "claude"
+    if model.startswith("gemini"):
+        return "gemini"
+    # Default non-Claude models to OpenAI-compatible path.
+    return "openai"
+
+
+async def _query_claude_judge(prompt: str, judge_model: str) -> str:
+    """Query Claude Agent SDK and return response text."""
+    if query is None or ClaudeAgentOptions is None:
+        raise RuntimeError(
+            "claude-agent-sdk not installed. Install with: uv add claude-agent-sdk"
+        )
+
+    options = ClaudeAgentOptions(
+        system_prompt=JUDGE_SYSTEM_PROMPT,
+        model=judge_model,
+        permission_mode="bypassPermissions",
+    )
+
+    all_text: list[str] = []
+    async for message in query(prompt=prompt, options=options):
+        if hasattr(message, "content"):
+            if isinstance(message.content, str):
+                all_text.append(message.content)
+            elif isinstance(message.content, list):
+                for block in message.content:
+                    if hasattr(block, "text"):
+                        all_text.append(block.text)
+    return "".join(all_text)
+
+
+async def _query_openai_judge(prompt: str, judge_model: str) -> str:
+    """Query OpenAI-compatible chat completions and return response text."""
+    if OpenAI is None:
+        raise RuntimeError("openai package not installed")
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY environment variable not set")
+
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model=judge_model,
+        messages=[
+            {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        response_format={"type": "json_object"},
+    )
+    return resp.choices[0].message.content or ""
+
+
+async def _query_gemini_judge(prompt: str, judge_model: str) -> str:
+    """Query Gemini and return response text."""
+    if genai is None or genai_types is None:
+        raise RuntimeError("google-genai package not installed")
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError("GOOGLE_API_KEY environment variable not set")
+
+    client = genai.Client(api_key=api_key)
+    resp = client.models.generate_content(
+        model=judge_model,
+        contents=prompt,
+        config=genai_types.GenerateContentConfig(
+            system_instruction=JUDGE_SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            temperature=0.0,
+        ),
+    )
+    return resp.text or ""
+
+
+async def _query_judge(prompt: str, judge_model: str) -> str:
+    """Route judge query to backend based on model name."""
+    provider = _infer_judge_provider(judge_model)
+    if provider == "claude":
+        return await _query_claude_judge(prompt, judge_model)
+    if provider == "gemini":
+        return await _query_gemini_judge(prompt, judge_model)
+    return await _query_openai_judge(prompt, judge_model)
+
+
 async def judge_with_claude(
     run_dir: Path,
     only_turns: Optional[set[int]] = None,
     debug: bool = False,
     expected_turns: Optional[List[Dict[str, Any]]] = None,
     skip_turn_taking: bool = False,
+    judge_model: str = JUDGE_MODEL,
 ) -> Dict[str, Any]:
     """Main judging function using two-phase realignment approach.
 
@@ -376,28 +476,14 @@ Remember:
 - Empty assistant_text with a valid tool call is still a valid turn - evaluate the tool call
 """
 
-    # Configure options - use extended thinking for complex reasoning
-    options = ClaudeAgentOptions(
-        system_prompt=JUDGE_SYSTEM_PROMPT,
-        model=JUDGE_MODEL,
-        permission_mode="bypassPermissions",
-    )
-
-    # Query Claude
-    all_text = []
-    async for message in query(prompt=prompt, options=options):
-        if hasattr(message, 'content'):
-            if isinstance(message.content, str):
-                all_text.append(message.content)
-            elif isinstance(message.content, list):
-                for block in message.content:
-                    if hasattr(block, 'text'):
-                        all_text.append(block.text)
-
-    response_text = "".join(all_text)
+    response_text = await _query_judge(prompt, judge_model)
 
     if debug:
-        print(f"Claude response length: {len(response_text)} chars", file=sys.stderr)
+        provider = _infer_judge_provider(judge_model)
+        print(
+            f"Judge provider={provider} model={judge_model} response length: {len(response_text)} chars",
+            file=sys.stderr,
+        )
         print(f"First 1000 chars:\n{response_text[:1000]}", file=sys.stderr)
 
     # Parse the JSON response
@@ -473,6 +559,8 @@ Remember:
         "turn_taking_analysis": turn_taking_analysis.to_dict() if turn_taking_analysis else None,
         "summary": f"Evaluated {len(judgments)} turns with realignment.",
         "model_name": model_name,
+        "judge_model": judge_model,
+        "judge_version": JUDGE_VERSION,
     }
 
 
@@ -489,6 +577,8 @@ def write_outputs(
     realignment_notes: str = "",
     function_tracking: Optional[Dict[str, Any]] = None,
     turn_taking_analysis: Optional[Dict[str, Any]] = None,
+    judge_model: str = JUDGE_MODEL,
+    judge_version: str = JUDGE_VERSION,
 ) -> None:
     """Write all output files.
 
@@ -547,8 +637,8 @@ def write_outputs(
         "model_name": model_name,
         "claude_passes": passes,
         "turns_scored": len(judgments),
-        "judge_version": JUDGE_VERSION,
-        "judge_model": JUDGE_MODEL,
+        "judge_version": judge_version,
+        "judge_model": judge_model,
         "judged_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "realignment_applied": bool(function_tracking),
         "function_tracking": function_tracking,
@@ -564,12 +654,12 @@ def write_outputs(
     # 3. claude_analysis.md
     total = len(judgments)
     lines = [
-        f"# Claude Agent SDK Evaluation (v4 with Turn-Taking)",
+        f"# Multi-Model Evaluation (v4 with Turn-Taking)",
         f"",
         f"**Model**: {model_name}",
         f"**Turns**: {total}",
-        f"**Judge**: {JUDGE_MODEL}",
-        f"**Judge Version**: {JUDGE_VERSION}",
+        f"**Judge**: {judge_model}",
+        f"**Judge Version**: {judge_version}",
         f"**Judged**: {summary_data['judged_at']}",
         f"",
         f"## Summary Metrics",
@@ -668,7 +758,7 @@ def write_outputs(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Judge conversation transcripts using Claude Agent SDK (v4 with turn-taking)"
+        description="Judge conversation transcripts using Claude/OpenAI/Gemini (v4 with turn-taking)"
     )
     parser.add_argument(
         "run_dir",
@@ -684,17 +774,16 @@ def main():
         action="store_true",
         help="Enable debug logging"
     )
+    parser.add_argument(
+        "--judge-model",
+        default=JUDGE_MODEL,
+        help="Judge model (e.g., claude-opus-4-5, gpt-4.1, gemini-2.5-flash)"
+    )
 
     args = parser.parse_args()
 
     # Load environment variables
     load_dotenv()
-
-    # Validate ANTHROPIC_API_KEY
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        print("ERROR: ANTHROPIC_API_KEY environment variable not set", file=sys.stderr)
-        print("Set it with: export ANTHROPIC_API_KEY=your_key_here", file=sys.stderr)
-        sys.exit(1)
 
     run_dir = Path(args.run_dir)
     if not run_dir.exists():
@@ -719,7 +808,14 @@ def main():
 
     # Run judgment
     try:
-        result = asyncio.run(judge_with_claude(run_dir, only_turns, args.debug))
+        result = asyncio.run(
+            judge_with_claude(
+                run_dir,
+                only_turns=only_turns,
+                debug=args.debug,
+                judge_model=args.judge_model,
+            )
+        )
     except Exception as e:
         print(f"ERROR: Judgment failed: {e}", file=sys.stderr)
         if args.debug:
@@ -737,6 +833,8 @@ def main():
         result.get("realignment_notes", ""),
         result.get("function_tracking", {}),
         result.get("turn_taking_analysis"),
+        result.get("judge_model", args.judge_model),
+        result.get("judge_version", JUDGE_VERSION),
     )
 
     # Print summary

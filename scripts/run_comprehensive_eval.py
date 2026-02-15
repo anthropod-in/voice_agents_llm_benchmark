@@ -124,6 +124,7 @@ async def judge_run(
         only_turns=None,
         debug=False,
         expected_turns=expected_turns,
+        judge_model=judge_model,
     )
 
     # Write outputs
@@ -133,6 +134,11 @@ async def judge_run(
         result["judgments"],
         result["summary"],
         result["model_name"],
+        result.get("realignment_notes", ""),
+        result.get("function_tracking", {}),
+        result.get("turn_taking_analysis"),
+        result.get("judge_model", judge_model),
+        result.get("judge_version", "multi-judge-v4-turn-taking"),
     )
 
     # Load and return summary

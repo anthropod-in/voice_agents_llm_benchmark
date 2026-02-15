@@ -119,7 +119,32 @@ def infer_pipeline(model: str) -> str:
     return "text"
 
 
-def create_run_directory(benchmark_name: str, model: str) -> Path:
+def _normalize_service_label(service: Optional[str]) -> Optional[str]:
+    """Normalize service alias/class to a short provider label."""
+    if not service:
+        return None
+    s = service.strip().lower()
+    if s in SERVICE_ALIASES:
+        return s
+    if "azure" in s:
+        return "azure"
+    if "openai" in s:
+        return "openai"
+    if "google" in s or "gemini" in s:
+        return "google"
+    if "anthropic" in s:
+        return "anthropic"
+    if "bedrock" in s:
+        return "bedrock"
+    if "groq" in s:
+        return "groq"
+    # Fallback to last class/module token.
+    return s.rsplit(".", 1)[-1]
+
+
+def create_run_directory(
+    benchmark_name: str, model: str, service_name: Optional[str] = None
+) -> Path:
     """Create timestamped run directory."""
     import uuid
 
@@ -128,8 +153,11 @@ def create_run_directory(benchmark_name: str, model: str) -> Path:
     unique_suffix = str(uuid.uuid4())[:8]
     # Sanitize model name for filesystem (replace / and :)
     safe_model = model.replace("/", "_").replace(":", "_")
+    service_label = _normalize_service_label(service_name)
+    # Include provider label to avoid collisions for same model across providers.
+    label = f"{service_label}__{safe_model}" if service_label else safe_model
     run_dir = (
-        Path("runs") / benchmark_name / f"{timestamp}_{safe_model}_{unique_suffix}"
+        Path("runs") / benchmark_name / f"{timestamp}_{label}_{unique_suffix}"
     )
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
@@ -225,7 +253,7 @@ async def _run(
     service_class = load_service_class(service) if service else None
 
     # Create output directory
-    run_dir = create_run_directory(benchmark_name, model)
+    run_dir = create_run_directory(benchmark_name, model, service)
     click.echo(f"Output directory: {run_dir}")
 
     # Setup logging
@@ -317,6 +345,7 @@ def judge(
                 only_turns=turn_indices_set,
                 debug=debug,
                 expected_turns=expected_turns,
+                judge_model=judge_model,
             )
         )
     except Exception as e:
@@ -332,6 +361,8 @@ def judge(
         result.get("realignment_notes", ""),
         result.get("function_tracking", {}),
         result.get("turn_taking_analysis"),
+        result.get("judge_model", judge_model),
+        result.get("judge_version", "multi-judge-v4-turn-taking"),
     )
 
     # Print summary

@@ -87,6 +87,24 @@ uv run multi-turn-eval run aiwf_medium_context --model claude-sonnet-4-5 --servi
 uv run multi-turn-eval judge runs/aiwf_medium_context/<timestamp>_claude-sonnet-4-5
 ```
 
+## Docker (EC2-friendly)
+
+If `uv sync` fails on EC2 due to platform/wheel issues, run in Docker.
+
+```bash
+# Build once
+bash scripts/build_benchmark_docker.sh
+
+# Run benchmark matrix in Docker (repo + .env mounted from host)
+bash scripts/run_benchmark_docker.sh \
+  --benchmark aiwf_medium_context \
+  --judge-model gemini-2.5-flash \
+  --cases all \
+  --runs-per-case 2
+```
+
+Outputs are written to your host workspace under `runs/` because the repo is bind-mounted into the container.
+
 ## Installation
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).

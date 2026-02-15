@@ -71,6 +71,20 @@ class TextPipeline(BasePipeline):
         self.context_aggregator = None
         self.last_msg_idx = 0
 
+    def _get_idle_timeout_secs(self) -> int:
+        """Return idle timeout with provider/model specific overrides.
+
+        Azure gpt-4.1 requests intermittently take longer before emitting frames,
+        so we use a higher idle timeout to avoid premature cancellation.
+        """
+        service_name = (self.service_name or "").lower()
+        model_name = (self.model_name or "").lower()
+        if "azure" in service_name and model_name == "gpt-4.1":
+            return 300
+        if "azure" in service_name and model_name.startswith("gpt-4.1"):
+            return 120
+        return 45
+
     def _setup_context(self) -> None:
         """Create LLMContext with system prompt, tools, and first user message."""
         # Get system instruction from benchmark
@@ -132,7 +146,7 @@ class TextPipeline(BasePipeline):
 
         self.task = PipelineTask(
             pipeline,
-            idle_timeout_secs=45,
+            idle_timeout_secs=self._get_idle_timeout_secs(),
             idle_timeout_frames=(MetricsFrame,),
             params=PipelineParams(
                 enable_metrics=True,

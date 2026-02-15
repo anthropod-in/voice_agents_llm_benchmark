@@ -1,6 +1,11 @@
 """System instruction for the long context benchmark."""
 from pathlib import Path
 
+_TARGET_KB_TOKENS = 30000
+# Conservative approximation for GPT-style BPE tokenizers.
+_APPROX_CHARS_PER_TOKEN = 4
+_KB_CHAR_BUDGET = _TARGET_KB_TOKENS * _APPROX_CHARS_PER_TOKEN
+
 _PREAMBLE = """
 Today is June 2, 2025.
 
@@ -147,10 +152,26 @@ request_tech_support_function = FunctionSchema(
 
 
 def _load_knowledge_base() -> str:
-    """Load the knowledge base from the data directory."""
+    """Load and cap the knowledge base to ~30K tokens.
+
+    We cap by character budget (approx 4 chars/token) to keep behavior
+    deterministic without requiring a tokenizer dependency at runtime.
+    """
     data_dir = Path(__file__).parent.parent / "data"
     kb_path = data_dir / "knowledge_base.txt"
-    return kb_path.read_text(encoding="utf-8")
+    kb_text = kb_path.read_text(encoding="utf-8")
+    if len(kb_text) <= _KB_CHAR_BUDGET:
+        return kb_text
+
+    # Trim on line boundaries to avoid cutting rows/sentences mid-line.
+    trimmed = []
+    current_len = 0
+    for line in kb_text.splitlines(keepends=True):
+        if current_len + len(line) > _KB_CHAR_BUDGET:
+            break
+        trimmed.append(line)
+        current_len += len(line)
+    return "".join(trimmed)
 
 
 # Build the complete system instruction

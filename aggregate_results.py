@@ -23,9 +23,6 @@ from pathlib import Path
 from collections import defaultdict
 import statistics
 
-RUNS_DIR = Path("runs/aiwf_medium_context")
-OUTPUT_DIR = Path("runs/aiwf_medium_context")
-
 # Model name mappings - EXACT matches only
 MODEL_MAPPINGS = {
     "gpt-4.1": "gpt-4.1",
@@ -46,15 +43,30 @@ MODEL_MAPPINGS = {
 }
 
 
-def get_model_from_dir(dir_name: str) -> str | None:
-    """Extract model name from directory name like 20251213T213018_gpt-4.1"""
+def parse_run_dir_model(dir_name: str) -> tuple[str, str, str] | None:
+    """Parse model/provider from run dir name.
+
+    Supports both:
+    - Old format: YYYYMMDDTHHMMSS_model_uuid
+    - New format: YYYYMMDDTHHMMSS_provider__model_uuid
+
+    Returns:
+        (raw_model, mapped_model, model_key_for_aggregation)
+    """
     parts = dir_name.split("_", 1)
-    if len(parts) == 2:
-        model_part = parts[1]
-        # EXACT matches only - no prefix matching
-        if model_part in MODEL_MAPPINGS:
-            return model_part
-    return None
+    if len(parts) != 2:
+        return None
+
+    remainder = parts[1]
+    label_part = remainder.rsplit("_", 1)[0] if "_" in remainder else remainder
+    provider = None
+    model_part = label_part
+    if "__" in label_part:
+        provider, model_part = label_part.split("__", 1)
+
+    mapped = MODEL_MAPPINGS.get(model_part, model_part)
+    model_key = f"{provider}:{mapped}" if provider else mapped
+    return model_part, mapped, model_key
 
 
 def load_summary(run_dir: Path) -> dict | None:
@@ -82,41 +94,85 @@ def load_transcript_ttfb(run_dir: Path) -> list[float]:
     return ttfb_values
 
 
+def build_markdown_table(rows: list[dict]) -> str:
+    """Build README-style markdown table from aggregated rows."""
+    lines = [
+        "| Model                     | Tool Use  | Instruction | KB Ground | Pass Rate | Median Rate | TTFB Med | TTFB P95 | TTFB Max |",
+        "|---------------------------|-----------|-------------|-----------|-----------|-------------|----------|----------|----------|",
+    ]
+    for row in rows:
+        model = row["model"]
+        tool = row["tool_use"]
+        instr = row["instruction_following"]
+        kb = row["kb_grounding"]
+        pass_rate = f"{row['pass_rate']:.1f}%"
+        median_rate = f"{row['median_pass_rate']:.1f}%"
+        ttfb_med = f"{int(row['ttfb_med'])}ms"
+        ttfb_p95 = f"{int(row['ttfb_p95'])}ms"
+        ttfb_max = f"{int(row['ttfb_max'])}ms"
+        lines.append(
+            f"| {model:<25} | {tool:<9} | {instr:<11} | {kb:<9} | {pass_rate:<9} | "
+            f"{median_rate:<11} | {ttfb_med:<8} | {ttfb_p95:<8} | {ttfb_max:<8} |"
+        )
+    return "\n".join(lines)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Aggregate benchmark results")
     parser.add_argument("--model", "-m", help="Filter to specific model (e.g., gpt-4o)")
+    parser.add_argument(
+        "--models",
+        help="Comma-separated list of models/model keys (e.g., openai:gpt-4.1,azure:gpt-4.1)",
+    )
     parser.add_argument("--runs", "-r", type=int, default=5, help="Number of recent runs per model (default: 5)")
+    parser.add_argument(
+        "--benchmark",
+        "-b",
+        default="aiwf_medium_context",
+        help="Benchmark run directory under runs/ (default: aiwf_medium_context)",
+    )
     args = parser.parse_args()
 
     run_timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    runs_dir = Path("runs") / args.benchmark
+    output_dir = runs_dir
 
-    # Determine which models to include
     if args.model:
-        if args.model not in MODEL_MAPPINGS:
-            print(f"Error: Unknown model '{args.model}'. Available: {list(MODEL_MAPPINGS.keys())}")
-            return
-        models_to_include = {args.model}
         print(f"Filtering to model: {args.model}, using {args.runs} most recent runs")
-    else:
-        models_to_include = set(MODEL_MAPPINGS.keys())
+    model_filters = set()
+    if args.models:
+        model_filters = {m.strip() for m in args.models.split(",") if m.strip()}
+        if model_filters:
+            print(
+                f"Filtering to models: {', '.join(sorted(model_filters))}, "
+                f"using {args.runs} most recent runs per model"
+            )
 
     # Collect ALL runs by model first
     all_runs = defaultdict(list)
 
+    if not runs_dir.exists():
+        raise FileNotFoundError(f"Run directory not found: {runs_dir}")
+
     # Scan all run directories
-    for run_dir in sorted(RUNS_DIR.iterdir()):
+    for run_dir in sorted(runs_dir.iterdir()):
         if not run_dir.is_dir():
             continue
 
-        model = get_model_from_dir(run_dir.name)
-        if model not in models_to_include:
+        parsed = parse_run_dir_model(run_dir.name)
+        if parsed is None:
+            continue
+        model_raw, model_mapped, model_key = parsed
+        if args.model and args.model not in {model_raw, model_mapped, model_key}:
+            continue
+        if model_filters and not (model_filters & {model_raw, model_mapped, model_key}):
             continue
 
         summary = load_summary(run_dir)
         if summary is None:
             continue
 
-        all_runs[model].append({
+        all_runs[model_key].append({
             "dir": run_dir,
             "name": run_dir.name,
             "summary": summary,
@@ -132,7 +188,7 @@ def main():
         "per_run_stats": [],  # Individual run statistics
     })
 
-    for model in models_to_include:
+    for model in sorted(all_runs.keys()):
         runs = all_runs[model]
         # Sort by directory name (which includes timestamp) and take last N
         runs_sorted = sorted(runs, key=lambda x: x["name"])
@@ -177,7 +233,7 @@ def main():
         "models": {},
     }
 
-    for model in models_to_include:
+    for model in sorted(results.keys()):
         data = results[model]
         if not data["tool_use"]:
             continue
@@ -236,29 +292,25 @@ def main():
     # Sort by pass rate descending
     aggregated.sort(key=lambda x: x["pass_rate"], reverse=True)
 
-    # Output table (without Run Directory column)
-    print("  | Model                | Tool Use  | Instruction | KB Ground | Aggr Rate | Median Rate | TTFB Med | TTFB P95 | TTFB Max |")
-    print("  |----------------------|-----------|-------------|-----------|-----------|-------------|----------|----------|----------|")
-
-    for row in aggregated:
-        model = row["model"]
-        tool = row["tool_use"]
-        instr = row["instruction_following"]
-        kb = row["kb_grounding"]
-        pass_rate = f"{row['pass_rate']:.1f}%"
-        median_rate = f"{row['median_pass_rate']:.1f}%"
-        ttfb_med = f"{int(row['ttfb_med'])}ms"
-        ttfb_p95 = f"{int(row['ttfb_p95'])}ms"
-        ttfb_max = f"{int(row['ttfb_max'])}ms"
-
-        print(f"  | {model:<20} | {tool:<9} | {instr:<11} | {kb:<9} | {pass_rate:<9} | {median_rate:<11} | {ttfb_med:<8} | {ttfb_p95:<8} | {ttfb_max:<8} |")
+    # Output README-style markdown table
+    markdown_table = build_markdown_table(aggregated)
+    print(markdown_table)
 
     # Save metadata to timestamped file
-    output_file = OUTPUT_DIR / f"analysis_{run_timestamp}.json"
+    output_file = output_dir / f"analysis_{run_timestamp}.json"
     with open(output_file, "w") as f:
         json.dump(metadata, f, indent=2)
 
+    md_file = output_dir / f"analysis_{run_timestamp}.md"
+    latest_md_file = output_dir / "analysis_latest.md"
+    with open(md_file, "w") as f:
+        f.write(markdown_table + "\n")
+    with open(latest_md_file, "w") as f:
+        f.write(markdown_table + "\n")
+
     print(f"\nMetadata saved to: {output_file}")
+    print(f"Markdown table saved to: {md_file}")
+    print(f"Latest markdown table: {latest_md_file}")
 
 
 if __name__ == "__main__":

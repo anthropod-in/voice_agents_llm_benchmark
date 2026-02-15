@@ -184,6 +184,26 @@ class BasePipeline(ABC):
                 )
                 logger.info(f"Configured {model} with reasoning_effort={reasoning_effort}, service_tier=priority")
 
+        elif "Azure" in class_name:
+            api_key = os.getenv("AZURE_OPENAI_API_KEY")
+            if not api_key:
+                raise EnvironmentError("AZURE_OPENAI_API_KEY environment variable is required")
+
+            endpoint = os.getenv("AZURE_OPENAI_ENDPOINT") or os.getenv("AZURE_BASE_ENDPOINT")
+            if not endpoint:
+                raise EnvironmentError(
+                    "AZURE_OPENAI_ENDPOINT (or AZURE_BASE_ENDPOINT) environment variable is required"
+                )
+            # Normalize common endpoint variants to azure_endpoint form.
+            # Azure client expects host-style endpoint (e.g., https://<name>.openai.azure.com).
+            endpoint = endpoint.strip().rstrip("/")
+            if endpoint.endswith("/openai/deployments"):
+                endpoint = endpoint[: -len("/openai/deployments")]
+
+            kwargs["api_key"] = api_key
+            kwargs["endpoint"] = endpoint
+            kwargs["api_version"] = os.getenv("AZURE_OPENAI_API_VERSION", "2024-09-01-preview")
+
         elif "Google" in class_name or "Gemini" in class_name:
             api_key = os.getenv("GOOGLE_API_KEY")
             if not api_key:
