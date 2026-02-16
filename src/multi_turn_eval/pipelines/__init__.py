@@ -15,28 +15,48 @@ Available pipelines:
 
 from multi_turn_eval.pipelines.base import BasePipeline
 from multi_turn_eval.pipelines.text import TextPipeline
-from multi_turn_eval.pipelines.realtime import (
-    RealtimePipeline,
-    GeminiLiveLLMServiceWithReconnection,
-)
-from multi_turn_eval.pipelines.grok_realtime import (
-    GrokRealtimePipeline,
-    XAIRealtimeLLMService,
-)
-from multi_turn_eval.pipelines.nova_sonic import (
-    NovaSonicPipeline,
-    NovaSonicLLMServiceWithCompletionSignal,
-    NovaSonicTurnGate,
-)
+
+# Optional audio/realtime pipelines may depend on heavy audio packages.
+# Keep text-only usage working when those extras are not installed.
+try:
+    from multi_turn_eval.pipelines.realtime import (
+        RealtimePipeline,
+        GeminiLiveLLMServiceWithReconnection,
+    )
+except ModuleNotFoundError:
+    RealtimePipeline = None
+    GeminiLiveLLMServiceWithReconnection = None
+
+try:
+    from multi_turn_eval.pipelines.grok_realtime import (
+        GrokRealtimePipeline,
+        XAIRealtimeLLMService,
+    )
+except ModuleNotFoundError:
+    GrokRealtimePipeline = None
+    XAIRealtimeLLMService = None
+
+try:
+    from multi_turn_eval.pipelines.nova_sonic import (
+        NovaSonicPipeline,
+        NovaSonicLLMServiceWithCompletionSignal,
+        NovaSonicTurnGate,
+    )
+except ModuleNotFoundError:
+    NovaSonicPipeline = None
+    NovaSonicLLMServiceWithCompletionSignal = None
+    NovaSonicTurnGate = None
 
 __all__ = [
     "BasePipeline",
     "TextPipeline",
-    "RealtimePipeline",
-    "GeminiLiveLLMServiceWithReconnection",
-    "GrokRealtimePipeline",
-    "XAIRealtimeLLMService",
-    "NovaSonicPipeline",
-    "NovaSonicLLMServiceWithCompletionSignal",
-    "NovaSonicTurnGate",
 ]
+
+if RealtimePipeline is not None:
+    __all__.extend(["RealtimePipeline", "GeminiLiveLLMServiceWithReconnection"])
+if GrokRealtimePipeline is not None:
+    __all__.extend(["GrokRealtimePipeline", "XAIRealtimeLLMService"])
+if NovaSonicPipeline is not None:
+    __all__.extend(
+        ["NovaSonicPipeline", "NovaSonicLLMServiceWithCompletionSignal", "NovaSonicTurnGate"]
+    )

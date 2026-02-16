@@ -81,7 +81,14 @@ echo "  judge model:   ${JUDGE_MODEL}"
 echo "  cases:         ${CASES}"
 echo "  runs per case: ${RUNS_PER_CASE}"
 
-docker run --rm -it \
+# Use interactive TTY only when script is launched from a real terminal.
+# Background/nohup runs should not pass -t, otherwise Docker exits immediately.
+DOCKER_TTY_FLAGS=()
+if [[ -t 0 && -t 1 ]]; then
+  DOCKER_TTY_FLAGS=(-it)
+fi
+
+docker run --rm "${DOCKER_TTY_FLAGS[@]}" \
   -v "$PWD":/workspace \
   --env-file "$PWD/.env" \
   -e HOME=/tmp \
